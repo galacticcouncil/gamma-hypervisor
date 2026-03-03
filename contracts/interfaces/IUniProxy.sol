@@ -9,8 +9,8 @@ interface IUniProxy {
     uint256 deposit0,
     uint256 deposit1,
     address to,
-    address from,
-    address pos
+    address pos,
+    uint256[4] memory minIn
   ) external returns (uint256 shares);
 
   function getDepositAmount(

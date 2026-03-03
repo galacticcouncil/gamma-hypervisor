@@ -8,19 +8,6 @@ import type { IHypervisor, IHypervisorInterface } from "../IHypervisor";
 
 const _abi = [
   {
-    inputs: [],
-    name: "PRECISION",
-    outputs: [
-      {
-        internalType: "uint256",
-        name: "",
-        type: "uint256",
-      },
-    ],
-    stateMutability: "view",
-    type: "function",
-  },
-  {
     inputs: [
       {
         internalType: "uint256",
@@ -62,6 +49,39 @@ const _abi = [
       },
     ],
     name: "addLimitLiquidity",
+    outputs: [],
+    stateMutability: "nonpayable",
+    type: "function",
+  },
+  {
+    inputs: [
+      {
+        internalType: "int24",
+        name: "tickLower",
+        type: "int24",
+      },
+      {
+        internalType: "int24",
+        name: "tickUpper",
+        type: "int24",
+      },
+      {
+        internalType: "uint256",
+        name: "amount0",
+        type: "uint256",
+      },
+      {
+        internalType: "uint256",
+        name: "amount1",
+        type: "uint256",
+      },
+      {
+        internalType: "uint256[2]",
+        name: "inMin",
+        type: "uint256[2]",
+      },
+    ],
+    name: "addLiquidity",
     outputs: [],
     stateMutability: "nonpayable",
     type: "function",
@@ -398,6 +418,45 @@ const _abi = [
     inputs: [
       {
         internalType: "int24",
+        name: "tickLower",
+        type: "int24",
+      },
+      {
+        internalType: "int24",
+        name: "tickUpper",
+        type: "int24",
+      },
+      {
+        internalType: "uint128",
+        name: "shares",
+        type: "uint128",
+      },
+      {
+        internalType: "uint256[2]",
+        name: "amountMin",
+        type: "uint256[2]",
+      },
+    ],
+    name: "pullLiquidity",
+    outputs: [
+      {
+        internalType: "uint256",
+        name: "base0",
+        type: "uint256",
+      },
+      {
+        internalType: "uint256",
+        name: "base1",
+        type: "uint256",
+      },
+    ],
+    stateMutability: "nonpayable",
+    type: "function",
+  },
+  {
+    inputs: [
+      {
+        internalType: "int24",
         name: "_baseLower",
         type: "int24",
       },
@@ -481,6 +540,13 @@ const _abi = [
       },
     ],
     stateMutability: "view",
+    type: "function",
+  },
+  {
+    inputs: [],
+    name: "toggleDirectDeposit",
+    outputs: [],
+    stateMutability: "nonpayable",
     type: "function",
   },
   {

@@ -39,7 +39,6 @@ task('deploy-masterchef', 'Deploy admin contract')
 
     // deploy contracts
 
-    const chefFactory = await ethers.getContractFactory('MasterChef')
 
     const chef = await deployContract(
       'MasterChef',
@@ -56,10 +55,42 @@ task('deploy-masterchef', 'Deploy admin contract')
 
 })
 
+task('initialize-masterchef', 'Deploy admin contract')
+  .addParam('masterchef', 'masterchef address')
+  .addParam('owner', 'owner address')
+  .setAction(async (cliArgs, { ethers, run, network }) => {
+
+    console.log('Network')
+    console.log('  ', network.name)
+
+    await run('compile')
+
+    // get signer
+
+    const signer = (await ethers.getSigners())[0]
+    console.log('Signer')
+    console.log('  at', signer.address)
+    console.log('  ETH', formatEther(await signer.getBalance()))
+
+    // deploy contracts
+
+    const chef = await ethers.getContractAt(
+      'MasterChef',
+      cliArgs.masterchef,
+      signer
+    )
+    let txResponse = await chef.transferOwnership(cliArgs.owner, true, false);
+    let receipt = await txResponse.wait();
+    console.log('Success')
+
+})
+
+
 task('deploy-rewarder', 'Deploy admin contract')
   .addParam('rewardToken', 'reward rate')
   .addParam('rate', 'reward rate')
-  .addParam('chef', 'reward rate')
+  .addParam('chef', 'chef address')
+  .addParam('owner', 'owner')
   .setAction(async (args, { ethers, run, network }) => {
     console.log('Network')
     console.log('  ', network.name)
@@ -79,7 +110,6 @@ task('deploy-rewarder', 'Deploy admin contract')
 
     // deploy contracts
 
-    const chefFactory = await ethers.getContractFactory('Rewarder')
 
     const chef = await deployContract(
       'Rewarder',
@@ -89,13 +119,43 @@ task('deploy-rewarder', 'Deploy admin contract')
     )
 
     await chef.deployTransaction.wait(30)
+    console.log('Success')
     await run('verify:verify', {
       address: chef.address,
       constructorArguments: [args.rewardToken, args.rate, args.chef]
     })
 
 });
+task('initialize-rewarder', 'Deploy admin contract')
+  .addParam('rewarder', 'rewarder address')
+  .addParam('owner', 'owner address')
+  .setAction(async (cliArgs, { ethers, run, network }) => {
 
+    console.log('Network')
+    console.log('  ', network.name)
+
+    await run('compile')
+
+    // get signer
+
+    const signer = (await ethers.getSigners())[0]
+    console.log('Signer')
+    console.log('  at', signer.address)
+    console.log('  ETH', formatEther(await signer.getBalance()))
+
+    // deploy contracts
+
+    const chef = await ethers.getContractAt(
+      'Rewarder',
+      cliArgs.rewarder,
+      signer
+    )
+    console.log('Transferring Ownership')
+    let txResponse = await chef.transferOwnership(cliArgs.owner, true, false);
+    let receipt = await txResponse.wait();
+    console.log('Success')
+
+})
 
 task('deploy-router', 'Deploy Hypervisor contract')
   .addParam('token0', 'token address')
@@ -254,7 +314,6 @@ task('deploy-token', 'Deploy admin contract')
 
 task('deploy-admin', 'Deploy admin contract')
   .addParam('admin', 'admin account')
-  .addParam('advisor', 'advisor account')
   .setAction(async (args, { ethers, run, network }) => {
     console.log('Network')
     console.log('  ', network.name)
@@ -280,13 +339,13 @@ task('deploy-admin', 'Deploy admin contract')
       'Admin',
       await ethers.getContractFactory('Admin'),
       signer,
-      [args.admin, args.advisor]
+      [args.admin]
     )
 
     await admin.deployTransaction.wait(5)
     await run('verify:verify', {
       address: admin.address,
-      constructorArguments: [args.admin, args.advisor]
+      constructorArguments: [args.admin]
     })
 
 });
@@ -331,7 +390,47 @@ task('deploy-hypervisor-factory', 'Deploy Hypervisor contract')
       constructorArguments: [args.uniswapFactory],
     })
 })
+task('deploy-hyperegistry', 'Deploy registry contract')
+  // .addParam('name', 'admin account')
+  // .addParam('symbol', 'advisor account')
+  // .addParam('decimals', 'advisor account')
+  .setAction(async (args, { ethers, run, network }) => {
+    console.log('Network')
+    console.log('  ', network.name)
+    console.log('Task Args')
+    console.log(args)
 
+    // compile
+
+    await run('compile')
+
+    // get signer
+
+    const signer = (await ethers.getSigners())[0]
+    console.log('Signer')
+    console.log('  at', signer.address)
+    console.log('  ETH', formatEther(await signer.getBalance()))
+
+    // deploy contracts
+
+    const adminFactory = await ethers.getContractFactory('HypeRegistry')
+
+    const admin = await deployContract(
+      'HypeRegistry',
+      await ethers.getContractFactory('HypeRegistry'),
+      signer,
+      // [args.name, args.symbol, args.decimals]
+      []
+    )
+
+    await admin.deployTransaction.wait(5)
+    await run('verify:verify', {
+      address: admin.address,
+      // constructorArguments: [args.name, args.symbol, args.decimals]
+      constructorArguments: []
+    })
+
+});
 task('deploy-hypervisor-orphan', 'Deploy Hypervisor contract without factory')
   .addParam('pool', 'the uniswap pool address')
   .addParam('name', 'erc20 name')
@@ -461,8 +560,190 @@ task('verify-hypervisor', 'Verify Hypervisor contract')
 
   });
 
-task('deploy-uniproxy', 'Deploy UniProxy contract')
+  task('deploy-clearing', 'Deploy UniProxy contract')
   .setAction(async (cliArgs, { ethers, run, network }) => {
+
+    await run('compile')
+
+    // get signer
+
+    const signer = (await ethers.getSigners())[0]
+    console.log('Signer')
+    console.log('  at', signer.address)
+    console.log('  ETH', formatEther(await signer.getBalance()))
+
+    console.log('Network')
+    console.log('  ', network.name)
+
+    const uniProxyFactory = await ethers.getContractFactory('Clearing')
+
+    const uniProxy = await deployContract(
+      'Clearing',
+      uniProxyFactory,
+      signer
+    )
+
+    await uniProxy.deployTransaction.wait(5)
+    await run('verify:verify', {
+      address: uniProxy.address
+    })
+  })
+  task('deploy-clearingv2', 'Deploy ClearingV2 contract')
+  .addParam('owner', 'the owner address')
+  .setAction(async (cliArgs, { ethers, run, network }) => {
+
+    await run('compile')
+
+    // get signer
+
+    const signer = (await ethers.getSigners())[0]
+    console.log('Signer')
+    console.log('  at', signer.address)
+    console.log('  ETH', formatEther(await signer.getBalance()))
+
+    console.log('Network')
+    console.log('  ', network.name)
+
+    const uniProxyFactory = await ethers.getContractFactory('ClearingV2')
+
+    const uniProxy = await deployContract(
+      'ClearingV2',
+      uniProxyFactory,
+      signer
+    )
+
+    await uniProxy.deployTransaction.wait(5)
+    await uniProxy.transferOwnership(cliArgs.owner);
+    await run('verify:verify', {
+      address: uniProxy.address
+    })
+  })
+  task('deploy-clearingv3', 'Deploy ClearingV3 contract')
+  .addParam('owner', 'the owner address')
+  .setAction(async (cliArgs, { ethers, run, network }) => {
+
+    await run('compile')
+
+    // get signer
+
+    const signer = (await ethers.getSigners())[0]
+    console.log('Signer')
+    console.log('  at', signer.address)
+    console.log('  ETH', formatEther(await signer.getBalance()))
+
+    console.log('Network')
+    console.log('  ', network.name)
+
+    const uniProxyFactory = await ethers.getContractFactory('ClearingV3')
+
+    const uniProxy = await deployContract(
+      'ClearingV2',
+      uniProxyFactory,
+      signer
+    )
+
+    await uniProxy.deployTransaction.wait(5)
+    await uniProxy.transferOwnership(cliArgs.owner);
+    await run('verify:verify', {
+      address: uniProxy.address
+    })
+  })
+
+  task('transfer-ownership', 'Transfer ownership for any contract')
+  .addParam('owner', 'the owner address')
+  .addParam('contract', 'the contract address')
+  .setAction(async ({ owner, contract }, { ethers, run, network }) => {
+
+    await run('compile')
+
+    // Log the network
+    console.log('Network')
+    console.log('  ', network.name)
+
+    // Get the signer
+    const signer = (await ethers.getSigners())[0];
+    console.log('Signer');
+    console.log('  at', signer.address);
+    console.log('  ETH', ethers.utils.formatEther(await signer.getBalance()));
+
+    // ABI for interacting with any contract that has a `transferOwnership` function
+    const abi = [
+      "function transferOwnership(address newOwner) external"
+    ];
+
+    // Connect to the contract using the ABI and the address of the contract
+    const contractInstance = new ethers.Contract(contract, abi, signer);
+
+    // Execute the transferOwnership function to transfer ownership to the new owner
+    await contractInstance.transferOwnership(owner);
+
+    console.log(`Ownership of contract at ${contract} transferred to ${owner}`);
+  });
+
+  task('transfer-clearance', 'Transfer clearance from the UniProxy contract')
+  .addParam('uniproxy', 'the uniproxy address')
+  .addParam('clearing', 'the clearing address')
+  .setAction(async ({ uniproxy, clearing }, { ethers, run, network }) => {
+
+    await run('compile')
+
+    // Log the network
+    console.log('Network')
+    console.log('  ', network.name)
+
+    // Get the signer
+    const signer = (await ethers.getSigners())[0];
+    console.log('Signer');
+    console.log('  at', signer.address);
+    console.log('  ETH', ethers.utils.formatEther(await signer.getBalance()));
+
+    // ABI for interacting with any contract that has a `transferOwnership` function
+    const abi = [
+      "function transferClearance(address newClearance) external"
+    ];
+
+    // Connect to the contract using the ABI and the address of the contract
+    const contractInstance = new ethers.Contract(uniproxy, abi, signer);
+
+    // Execute the transferOwnership function to transfer ownership to the new owner
+    await contractInstance.transferClearance(clearing);
+
+    console.log(`Clearance of UniProxy at ${uniproxy} transferred to ${clearing}`);
+  });
+
+  task('deploy-clearingtest', 'Deploy UniProxy contract')
+  .setAction(async (cliArgs, { ethers, run, network }) => {
+
+    await run('compile')
+
+    // get signer
+
+    const signer = (await ethers.getSigners())[0]
+    console.log('Signer')
+    console.log('  at', signer.address)
+    console.log('  ETH', formatEther(await signer.getBalance()))
+
+    console.log('Network')
+    console.log('  ', network.name)
+
+    const uniProxyFactory = await ethers.getContractFactory('ClearingTest')
+
+    const uniProxy = await deployContract(
+      'Clearing',
+      uniProxyFactory,
+      signer
+    )
+
+    await uniProxy.deployTransaction.wait(5)
+    await run('verify:verify', {
+      address: uniProxy.address
+    })
+  })
+
+  task('deploy-uniproxy', 'Deploy UniProxy contract')
+  .addParam('clearing', 'the UniProxy to verify')
+  .addParam('owner', 'the owner')
+  .setAction(async (args, { ethers, run, network }) => {
 
     await run('compile')
 
@@ -481,12 +762,149 @@ task('deploy-uniproxy', 'Deploy UniProxy contract')
     const uniProxy = await deployContract(
       'UniProxy',
       uniProxyFactory,
-      signer
+      signer,
+			[args.clearing]
+    )
+
+    await uniProxy.deployTransaction.wait(5)
+    await uniProxy.transferOwnership(args.owner);
+    await run('verify:verify', {
+      address: uniProxy.address,
+			constructorArguments: [args.clearing]
+    })
+  })
+
+  // task('deploy-uniproxyv2', 'Deploy UniProxy contract')
+  // .addParam('clearing', 'the UniProxy to verify')
+  // .addParam('owner', 'the owner')
+  // .setAction(async (args, { ethers, run, network }) => {
+
+  //   await run('compile')
+
+  //   // get signer
+
+  //   const signer = (await ethers.getSigners())[0]
+  //   console.log('Signer')
+  //   console.log('  at', signer.address)
+  //   console.log('  ETH', formatEther(await signer.getBalance()))
+
+  //   console.log('Network')
+  //   console.log('  ', network.name)
+
+  //   const uniProxyFactory = await ethers.getContractFactory('UniProxyV2')
+
+  //   const uniProxy = await deployContract(
+  //     'UniProxy',
+  //     uniProxyFactory,
+  //     signer,
+	// 		[args.clearing]
+  //   )
+
+  //   await uniProxy.deployTransaction.wait(5)
+  //   await uniProxy.transferOwnership(args.owner);
+  //   await run('verify:verify', {
+  //     address: uniProxy.address,
+	// 		constructorArguments: [args.clearing]
+  //   })
+  // })
+
+
+  task('deploy-rebalanceproxy', 'Deploy RebalanceProxy contract')
+  .addParam('owner', 'the owner')
+  .setAction(async (args, { ethers, run, network }) => {
+
+    await run('compile')
+
+    // get signer
+
+    const signer = (await ethers.getSigners())[0]
+    console.log('Signer')
+    console.log('  at', signer.address)
+    console.log('  ETH', formatEther(await signer.getBalance()))
+
+    console.log('Network')
+    console.log('  ', network.name)
+
+    const rebalanceProxyContract = await ethers.getContractFactory('RebalanceProxy')
+
+    const rebalanceProxy = await deployContract(
+      'RebalanceProxy',
+      rebalanceProxyContract,
+      signer,
+			[args.owner]
+    )
+
+    await rebalanceProxy.deployTransaction.wait(5)
+    await run('verify:verify', {
+      address: rebalanceProxy.address,
+			constructorArguments: [args.owner]
+    })
+  })
+
+
+
+  task('deploy-uniproxyv2', 'Deploy UniProxyV2 contract')
+  .addParam('keeper', 'the keeper address')
+  .addParam('clearing', 'the ClearingV2 to verify')
+  .setAction(async (args, { ethers, run, network }) => {
+
+    await run('compile')
+
+    // get signer
+
+    const signer = (await ethers.getSigners())[0]
+    console.log('Signer')
+    console.log('  at', signer.address)
+    console.log('  ETH', formatEther(await signer.getBalance()))
+
+    console.log('Network')
+    console.log('  ', network.name)
+
+    const uniProxyFactory = await ethers.getContractFactory('UniProxyV2')
+
+    const uniProxy = await deployContract(
+      'UniProxyV2',
+      uniProxyFactory,
+      signer,
+			[args.clearing,args.keeper]
     )
 
     await uniProxy.deployTransaction.wait(5)
     await run('verify:verify', {
-      address: uniProxy.address
+      address: uniProxy.address,
+			constructorArguments: [args.clearing,args.keeper]
+    })
+  })
+
+  task('deploy-uniproxytest', 'Deploy UniProxy contract')
+  .addParam('clearing', 'the UniProxy to verify')
+  .setAction(async (args, { ethers, run, network }) => {
+
+    await run('compile')
+
+    // get signer
+
+    const signer = (await ethers.getSigners())[0]
+    console.log('Signer')
+    console.log('  at', signer.address)
+    console.log('  ETH', formatEther(await signer.getBalance()))
+
+    console.log('Network')
+    console.log('  ', network.name)
+
+    const uniProxyFactory = await ethers.getContractFactory('UniProxyTest')
+
+    const uniProxy = await deployContract(
+      'UniProxy',
+      uniProxyFactory,
+      signer,
+			[args.clearing]
+    )
+
+    await uniProxy.deployTransaction.wait(5)
+    await run('verify:verify', {
+      address: uniProxy.address,
+			constructorArguments: [args.clearing]
     })
   })
 
@@ -517,12 +935,13 @@ task('verify-uniproxy', 'Verify UniProxy contract')
     })
   })
 
-task('initialize-hypervisor', 'Initialize Hypervisor contract')
+  task('initialize-hypervisor', 'Initialize Hypervisor contract')
   .addParam('hypervisor', 'the hypervisor')
   .addParam('amount0', 'the amount of token0')
   .addParam('amount1', 'the amount of token1')
   .addParam('uniproxy', 'the uniproxy')
   .addParam('admin', 'the admin address')
+  // .addParam('hyperegistry', 'the hyperegistry')
   .setAction(async (cliArgs, { ethers, run, network }) => {
 
     console.log('Network')
@@ -543,7 +962,8 @@ task('initialize-hypervisor', 'Initialize Hypervisor contract')
       amount0: cliArgs.amount0,
       amount1: cliArgs.amount1,
       uniproxy: cliArgs.uniproxy,
-      admin: cliArgs.admin
+      admin: cliArgs.admin,
+      hyperegistry: cliArgs.hyperegistry
     }
 
     console.log('Task Args')
@@ -567,109 +987,274 @@ task('initialize-hypervisor', 'Initialize Hypervisor contract')
       signer
     )
 
+
     const token1 = await ethers.getContractAt(
       'ERC20',
       await hypervisor.token1(),
       signer
     )
 
+    // const hyperegistry = await ethers.getContractAt(
+    //   'HypeRegistry',
+    //   cliArgs.hyperegistry,
+    //   signer,
+    // )
+    console.log('Signer')
+    console.log('  at', signer.address)
+
+
+
+    // Set Whitelist
+    // console.log('Adding to HypeRegistry ...')
+    // //await hypervisor.setWhitelist(signer.address)
+    // let txResponseFirst = await hyperegistry.add(cliArgs.hypervisor);
+    // let receiptFirst = await txResponseFirst.wait();
+
+    console.log('Success')
     console.log('Signer')
     console.log('  at', signer.address)
     console.log(' ', (await token0.symbol()), ' ', formatUnits(await token0.balanceOf(signer.address), await token0.decimals()))
     console.log(' ', (await token1.symbol()), ' ', formatUnits(await token1.balanceOf(signer.address), await token1.decimals()))
 
-    // Token Approval
-    console.log('Token Approving...')
-    await token0.approve(hypervisor.address, MaxUint256)
-    await token1.approve(hypervisor.address, MaxUint256)
-    console.log('Approval Success')
+    // // Token Approval
+    // console.log('Token Approving...')
+    // let txResponse0 = await token0.approve(hypervisor.address, parseUnits(cliArgs.amount0, (await token0.decimals())));
+    // let receipt0 = await txResponse0.wait();
+    // let txResponse1 = await token1.approve(hypervisor.address, ethers.utils.parseUnits(cliArgs.amount1, (await token1.decimals())));
+    // let receipt1 = await txResponse1.wait();
+    // //await token0.approve(hypervisor.address, parseUnits(cliArgs.amount0, (await token0.decimals())))
+    // //await token1.approve(hypervisor.address, parseUnits(cliArgs.amount1, (await token1.decimals())))
+    // console.log('Approval Success')
 
-    // Set Whitelist
-    console.log('Whitelist Signer...')
-    await hypervisor.setWhitelist(signer.address)
-    console.log('Success')
+    // // Set Whitelist
+    // console.log('Whitelist Signer...')
+    // //await hypervisor.setWhitelist(signer.address)
+    // let txResponse2 = await hypervisor.setWhitelist(signer.address);
+    // let receipt2 = await txResponse2.wait();
+    // console.log('Success')
 
-    // Make First Deposit
-    console.log('First Depositing...')
-    console.log(      parseUnits(cliArgs.amount0, (await token0.decimals())),
-      parseUnits(cliArgs.amount1, (await token1.decimals())),
-      signer.address,
-      signer.address)
+    // // Make First Deposit
+    // console.log('First Depositing...')
 
-    await hypervisor.deposit(
-      parseUnits(cliArgs.amount0, (await token0.decimals())),
-      parseUnits(cliArgs.amount1, (await token1.decimals())),
-      signer.address,
-      signer.address,
-      [0, 0, 0, 0]
-    )
-    console.log('Success')
+    // let txResponse3 = await hypervisor.deposit(
+    //   ethers.utils.parseUnits(cliArgs.amount0, (await token0.decimals())),
+    //   ethers.utils.parseUnits(cliArgs.amount1, (await token1.decimals())),
+    //   signer.address,
+    //   signer.address,
+    //   [0, 0, 0, 0]
+    // );
+    
+    // let receipt3 = await txResponse3.wait();
+    // console.log('Success')
 
     // Rebalance
     console.log('Rebalancing')
-    const pool = await ethers.getContractAt(
-      'UniswapV3Pool',
-      await hypervisor.pool(),
-      signer
-    )
-    const tickSpacing = 100
-    const percent = 8
-    let currentTick: number
-    [, currentTick] = await pool.slot0()
-    let [baseLower, baseUpper] = baseTicksFromCurrentTick(
-      currentTick,
-      await token0.decimals(),
-      await token1.decimals(),
-      tickSpacing,
-      percent
-    )
-    let [limitLower, limitUpper] = limitTicksFromCurrentTick(
-      currentTick,
-      await token0.decimals(),
-      await token1.decimals(),
-      tickSpacing,
-      percent,
-      true
-    )
-    
-    console.log(baseLower)
-    console.log(baseUpper)
-    console.log(limitLower)
-    console.log(limitUpper)
-    
-    // await hypervisor.rebalance(
-    //   -6000,
-    //   6000,
-    //   -600,
-    //   600,
-    //   signer.address,
-    //   [0, 0, 0, 0],
-    //   [0, 0, 0, 0]
-    // )
 
-    await hypervisor.rebalance(
-      baseLower,
-      baseUpper,
-      limitLower,
-      limitUpper,
-      signer.address,
-      [0, 0, 0, 0],
-      [0, 0, 0, 0]
-    )
+
+   let txResponse4 = await hypervisor.rebalance(
+    -887220,
+    887220,
+    -6000,
+    6000,
+    signer.address,
+    [0, 0, 0, 0],
+    [0, 0, 0, 0]
+  );
+  
+  let receipt4 = await txResponse4.wait();
+  
     console.log('Success')
 
     // Whitelist uniproxy
     console.log('Whitelist uniproxy')
-    await hypervisor.setWhitelist(cliArgs.uniproxy)
-    console.log('Success')
+   // await hypervisor.setWhitelist(cliArgs.uniproxy)
+    let txResponse5 = await hypervisor.setWhitelist(cliArgs.uniproxy);
+    let receipt5 = await txResponse5.wait();
+
+   console.log('Success')
+
+  //  console.log('Add to uniproxy');
+  //  await uniproxy.addPosition(hypervisor.address,4);
+  //  console.log('Success')
 
     // TransferOnwership
     console.log('Transferring Ownership')
-    await hypervisor.transferOwnership(cliArgs.admin)
+    //await hypervisor.transferOwnership(cliArgs.admin)
+    let txResponse6 = await hypervisor.transferOwnership(cliArgs.admin);
+    let receipt6 = await txResponse6.wait();
+
     console.log('Success')
 
-    console.log('Add to uniproxy');
-    await uniproxy.addPosition(hypervisor.address,4);
+  });
+
+  task('add-hypereg', 'Add to HypeRegistry')
+  .addParam('hype', 'the hypervisor')
+  .addParam('hypereg', 'the hyperegistry contract')
+  .setAction(async (cliArgs, { ethers, run, network }) => {
+
+    console.log('Network')
+    console.log('  ', network.name)
+
+    await run('compile')
+
+    // get signer
+
+    const signer = (await ethers.getSigners())[0]
+    console.log('Signer')
+    console.log('  at', signer.address)
+    console.log('  ETH', formatEther(await signer.getBalance()))
+
+    const args = {
+      hype: cliArgs.hype,
+      owner: signer.address,
+      hypereg: cliArgs.hypereg,
+    }
+
+    console.log('Task Args')
+    console.log(args)
+
+
+    const hyperegistry = await ethers.getContractAt(
+      'HypeRegistry',
+      cliArgs.hypereg,
+      signer,
+    )
+    console.log('Signer')
+    console.log('  at', signer.address)
+
+
+
+    // Set Whitelist
+    console.log('Adding to HypeRegistry ...')
+    //await hypervisor.setWhitelist(signer.address)
+    let txResponse2 = await hyperegistry.add(cliArgs.hype);
+    let receipt2 = await txResponse2.wait();
     console.log('Success')
+
+
+  });
+
+  task('add-clearing', 'Initialize Hypervisor contract')
+  .addParam('hypervisor', 'the hypervisor')
+  .addParam('clearing', 'the clearing')
+  .setAction(async (cliArgs, { ethers, run, network }) => {
+
+    console.log('Network')
+    console.log('  ', network.name)
+
+    await run('compile')
+
+    // get signer
+
+    const signer = (await ethers.getSigners())[0]
+    console.log('Signer')
+    console.log('  at', signer.address)
+    console.log('  ETH', formatEther(await signer.getBalance()))
+
+    const args = {
+      hypervisor: cliArgs.hypervisor,
+      owner: signer.address,
+      clearing: cliArgs.clearing,
+    }
+
+    console.log('Task Args')
+    console.log(args)
+
+    const hypervisor = await ethers.getContractAt(
+      'Hypervisor',
+      cliArgs.hypervisor,
+      signer,
+    )
+
+    const clearing = await ethers.getContractAt(
+      'ClearingV2',
+      cliArgs.clearing,
+      signer,
+    )
+
+
+    console.log('Signer')
+    console.log('  at', signer.address)
+
+
+  //  console.log('Add to clearing');
+  //  let txResponse = await clearing.addPosition(hypervisor.address,4);
+  //  let response1 = txResponse.wait();
+  //  console.log('Success')
+   
+   console.log('set deposit override');
+   let txResponse2 = await clearing.setDepositOverride(hypervisor.address, "false");
+   let response2=txResponse2.wait();
+   console.log('Success')
+
+  //  console.log('set twap override');
+  //  let txResponse3 = await clearing.setTwapOverride(hypervisor.address, "true", 3600, 10100);
+  //  let response3 = txResponse3.wait();
+  //  console.log('Success')
+
+
+  });
+  task('set-whitelist', 'Initialize Hypervisor contract')
+  .addParam('hypervisor', 'the hypervisor')
+  // .addParam('admin', 'the clearing')
+  .setAction(async (cliArgs, { ethers, run, network }) => {
+
+    console.log('Network')
+    console.log('  ', network.name)
+
+    await run('compile')
+
+    // get signer
+
+    const signer = (await ethers.getSigners())[0]
+    console.log('Signer')
+    console.log('  at', signer.address)
+    console.log('  ETH', formatEther(await signer.getBalance()))
+
+    const args = {
+      hypervisor: cliArgs.hypervisor,
+      owner: signer.address
+      // admin: cliArgs.admin,
+    }
+
+    console.log('Task Args')
+    console.log(args)
+
+    const hypervisor = await ethers.getContractAt(
+      'Hypervisor',
+      cliArgs.hypervisor,
+      signer,
+    )
+
+    // const admin = await ethers.getContractAt(
+    //   'Admin',
+    //   cliArgs.admin,
+    //   signer,
+    // )
+
+
+    console.log('Signer')
+    console.log('  at', signer.address)
+
+    console.log('Whitelist Signer...')
+    //await hypervisor.setWhitelist(signer.address)
+    let txResponse1 = await hypervisor.removeWhitelisted();
+    let receipt2 = await txResponse1.wait();
+    console.log('Success')
+  //  console.log('Add to clearing');
+  //  let txResponse = await clearing.addPosition(hypervisor.address,4);
+  //  let response1 = txResponse.wait();
+  //  console.log('Success')
+   
+  //  console.log('set deposit override');
+  //  let txResponse2 = await clearing.setDepositOverride(hypervisor.address, "true");
+  //  let response2=txResponse2.wait();
+  //  console.log('Success')
+
+  //  console.log('set twap override');
+  //  let txResponse3 = await clearing.setTwapOverride(hypervisor.address, "true", 3600, 10100);
+  //  let response3 = txResponse3.wait();
+  //  console.log('Success')
+
 
   });

@@ -1,0 +1,96 @@
+[profile.default]
+src = "contracts"
+out = "out"
+libs = ["lib"]
+test = "test"
+cache_path = "cache_forge"
+
+# Fork caching configuration for faster test runs
+rpc_storage_caching = { chains = "all", endpoints = "all" }
+rpc_cache_dir = "cache_forge/rpc"
+no_storage_caching = false
+# Cache recent blocks for better performance with latest block forks
+block_cache_size = 100
+
+# Compiler settings matching hardhat config
+solc_version = "0.7.6"
+optimizer = true
+optimizer_runs = 800
+via_ir = false
+
+# Additional compiler versions for legacy contracts
+evm_version = "shanghai"
+bytecode_hash = "none"
+auto_detect_solc = true
+
+# Remappings
+remappings = [
+    "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
+    "@uniswap/v3-core/=lib/v3-core/",
+    "@uniswap/v3-periphery/=lib/v3-periphery/",
+    "forge-std/=lib/forge-std/src/"
+]
+
+# RPC endpoints and network configurations
+[rpc_endpoints]
+mainnet = "https://eth-mainnet.g.alchemy.com/v2/4-9c9H-ltSW8qTuPTvSIU9YIin9D_pDd"
+sepolia = "https://sepolia.gateway.tenderly.co"
+polygon = "https://polygon-mainnet.g.alchemy.com/v2/VU6_Meq6eWSZ8lyqtxBI3WYsqNVwPXUM"
+optimism = "https://1rpc.io/op"
+arbitrum = "https://open-platform.nodereal.io/22002f5f88f7479ba33875b79bd82856/arbitrum-nitro/"
+base = "https://base-mainnet.g.alchemy.com/v2/XzGrCLsKf3U4sVEH1sVrkNINWYfvBvE0"
+celo = "https://forno.celo.org"
+bsc = "https://bsc-mainnet.nodereal.io/v1/c90506ed63514e5e8f9fcd7e7ea2aacd"
+zkevm = "https://polygonzkevm-mainnet.g.alchemy.com/v2/6MaZoczRQ_jD1PEuDHSv818Yc7LUpUWM"
+moonbeam = "https://moonbeam.api.onfinality.io/public"
+kava = "https://kava-evm.publicnode.com"
+manta = "https://pacific-rpc.manta.network/http"
+opbnb = "https://opbnb-mainnet.nodereal.io/v1/35532b74bba644158b8515755bfa49e2"
+linea = "https://linea-mainnet.infura.io/v3/4eecb9679beb476e92d378a4c8cfeeb7"
+astar = "https://rpc.startale.com/astar-zkevm"
+immutable = "https://rpc.immutable.com"
+avalanche = "https://open-platform.nodereal.io/e28f5a1ed30a49209126892ced24d74b/avalanche-c/ext/bc/C/rpc"
+blast = "https://rpc.blast.io"
+scroll = "https://rpc.scroll.io"
+mantle = "https://rpc.mantle.xyz"
+rootstock = "https://public-node.rsk.co"
+taiko = "https://rpc.mainnet.taiko.xyz"
+zklink = "https://rpc.zklink.io"
+sei = "https://evm-rpc.sei-apis.com"
+seitestnet = "https://evm-rpc-testnet.sei-apis.com"
+iota = "https://iota-mainnet-evm.public.blastapi.io"
+xlayer = "https://xlayerrpc.okx.com"
+zircuit = "https://zircuit1-mainnet.p2pify.com"
+core = "https://core.public.infstones.com"
+gnosis = "https://gnosis-mainnet.public.blastapi.io"
+berachain = "https://bartio.rpc.berachain.com"
+worldchain = "https://worldchain-mainnet.g.alchemy.com/public"
+sonic = "https://sonic.drpc.org"
+bob = "https://rpc.gobob.xyz"
+unichain = "https://unichain-rpc.publicnode.com"
+nibiru = "https://evm-rpc.nibiru.fi"
+
+
+# Fuzz testing
+[fuzz]
+runs = 1000
+max_test_rejects = 65536
+seed = '0x3e8'
+dictionary_weight = 40
+include_storage = true
+include_push_bytes = true
+
+# Invariant testing
+[invariant]
+runs = 256
+depth = 15
+fail_on_revert = false
+call_override = false
+dictionary_weight = 80
+include_storage = true
+include_push_bytes = true
+shrink_run_limit = 5000
+
+# Test coverage
+coverage = true
+coverage_lcov = true

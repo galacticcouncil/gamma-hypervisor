@@ -4,3 +4,8 @@ package-lock.json
 typechain
 artifacts
 cache
+cache_forge/rpc/
+cache_forge/
+out/
+broadcast/
+.DS_Store

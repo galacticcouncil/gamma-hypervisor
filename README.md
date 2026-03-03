@@ -1,22 +1,66 @@
-## Hypervisor
+## Foundry
 
-###
-A Uniswap V2-like interface with fungible liquidity to Uniswap V3
-which allows for arbitrary liquidity provision: one-sided, lop-sided, and
-balanced
+**Foundry is a blazing fast, portable and modular toolkit for Ethereum application development written in Rust.**
 
-Consult tests/deposit_withdraw.test.ts for deposit, withdrawal, rebalance examples
+Foundry consists of:
 
-### Tasks
+- **Forge**: Ethereum testing framework (like Truffle, Hardhat and DappTools).
+- **Cast**: Swiss army knife for interacting with EVM smart contracts, sending transactions and getting chain data.
+- **Anvil**: Local Ethereum node, akin to Ganache, Hardhat Network.
+- **Chisel**: Fast, utilitarian, and verbose solidity REPL.
 
-Deploys hypervisor
+## Documentation
 
-`npx hardhat deploy-hypervisor-orphan --pool UNIV3-POOL-ADDRESS --name ERC20-NAME --symbol ERC20-SYMBOL --network NETWORK`
+https://book.getfoundry.sh/
 
-Initialize hypervisor
+## Usage
 
-`npx hardhat initialize-hypervisor --hypervisor HYPERVISOR-ADDRESS --amount0 TOKEN0-AMOUNT --amount1 TOKEN1-AMOUNT --uniProxy UNIPROXY-ADDRESS --adminAddress ADMIN-ADDRESS --network NETWORK`
+### Build
 
-### Testing
+```shell
+$ forge build
+```
 
-`npx hardhat test`
+### Test
+
+```shell
+$ forge test
+```
+
+### Format
+
+```shell
+$ forge fmt
+```
+
+### Gas Snapshots
+
+```shell
+$ forge snapshot
+```
+
+### Anvil
+
+```shell
+$ anvil
+```
+
+### Deploy
+
+```shell
+$ forge script script/Counter.s.sol:CounterScript --rpc-url <your_rpc_url> --private-key <your_private_key>
+```
+
+### Cast
+
+```shell
+$ cast <subcommand>
+```
+
+### Help
+
+```shell
+$ forge --help
+$ anvil --help
+$ cast --help
+```

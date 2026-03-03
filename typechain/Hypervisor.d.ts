@@ -23,8 +23,7 @@ interface HypervisorInterface extends ethers.utils.Interface {
   functions: {
     "DOMAIN_SEPARATOR()": FunctionFragment;
     "PRECISION()": FunctionFragment;
-    "addBaseLiquidity(uint256,uint256,uint256[2])": FunctionFragment;
-    "addLimitLiquidity(uint256,uint256,uint256[2])": FunctionFragment;
+    "addLiquidity(int24,int24,uint256,uint256,uint256[2])": FunctionFragment;
     "allowance(address,address)": FunctionFragment;
     "approve(address,uint256)": FunctionFragment;
     "balanceOf(address)": FunctionFragment;
@@ -39,6 +38,7 @@ interface HypervisorInterface extends ethers.utils.Interface {
     "deposit1Max()": FunctionFragment;
     "directDeposit()": FunctionFragment;
     "fee()": FunctionFragment;
+    "feeRecipient()": FunctionFragment;
     "getBasePosition()": FunctionFragment;
     "getLimitPosition()": FunctionFragment;
     "getTotalAmounts()": FunctionFragment;
@@ -51,7 +51,7 @@ interface HypervisorInterface extends ethers.utils.Interface {
     "owner()": FunctionFragment;
     "permit(address,address,uint256,uint256,uint8,bytes32,bytes32)": FunctionFragment;
     "pool()": FunctionFragment;
-    "pullLiquidity(uint256,uint256[4])": FunctionFragment;
+    "pullLiquidity(int24,int24,uint128,uint256[2])": FunctionFragment;
     "rebalance(int24,int24,int24,int24,address,uint256[4],uint256[4])": FunctionFragment;
     "removeWhitelisted()": FunctionFragment;
     "setFee(uint8)": FunctionFragment;
@@ -76,12 +76,14 @@ interface HypervisorInterface extends ethers.utils.Interface {
   ): string;
   encodeFunctionData(functionFragment: "PRECISION", values?: undefined): string;
   encodeFunctionData(
-    functionFragment: "addBaseLiquidity",
-    values: [BigNumberish, BigNumberish, [BigNumberish, BigNumberish]]
-  ): string;
-  encodeFunctionData(
-    functionFragment: "addLimitLiquidity",
-    values: [BigNumberish, BigNumberish, [BigNumberish, BigNumberish]]
+    functionFragment: "addLiquidity",
+    values: [
+      BigNumberish,
+      BigNumberish,
+      BigNumberish,
+      BigNumberish,
+      [BigNumberish, BigNumberish]
+    ]
   ): string;
   encodeFunctionData(
     functionFragment: "allowance",
@@ -131,6 +133,10 @@ interface HypervisorInterface extends ethers.utils.Interface {
   ): string;
   encodeFunctionData(functionFragment: "fee", values?: undefined): string;
   encodeFunctionData(
+    functionFragment: "feeRecipient",
+    values?: undefined
+  ): string;
+  encodeFunctionData(
     functionFragment: "getBasePosition",
     values?: undefined
   ): string;
@@ -178,7 +184,9 @@ interface HypervisorInterface extends ethers.utils.Interface {
     functionFragment: "pullLiquidity",
     values: [
       BigNumberish,
-      [BigNumberish, BigNumberish, BigNumberish, BigNumberish]
+      BigNumberish,
+      BigNumberish,
+      [BigNumberish, BigNumberish]
     ]
   ): string;
   encodeFunctionData(
@@ -256,11 +264,7 @@ interface HypervisorInterface extends ethers.utils.Interface {
   ): Result;
   decodeFunctionResult(functionFragment: "PRECISION", data: BytesLike): Result;
   decodeFunctionResult(
-    functionFragment: "addBaseLiquidity",
-    data: BytesLike
-  ): Result;
-  decodeFunctionResult(
-    functionFragment: "addLimitLiquidity",
+    functionFragment: "addLiquidity",
     data: BytesLike
   ): Result;
   decodeFunctionResult(functionFragment: "allowance", data: BytesLike): Result;
@@ -292,6 +296,10 @@ interface HypervisorInterface extends ethers.utils.Interface {
     data: BytesLike
   ): Result;
   decodeFunctionResult(functionFragment: "fee", data: BytesLike): Result;
+  decodeFunctionResult(
+    functionFragment: "feeRecipient",
+    data: BytesLike
+  ): Result;
   decodeFunctionResult(
     functionFragment: "getBasePosition",
     data: BytesLike
@@ -371,15 +379,19 @@ interface HypervisorInterface extends ethers.utils.Interface {
     "Approval(address,address,uint256)": EventFragment;
     "Deposit(address,address,uint256,uint256,uint256)": EventFragment;
     "Rebalance(int24,uint256,uint256,uint256,uint256,uint256)": EventFragment;
+    "SetFee(uint8)": EventFragment;
     "Transfer(address,address,uint256)": EventFragment;
     "Withdraw(address,address,uint256,uint256,uint256)": EventFragment;
+    "ZeroBurn(uint8,uint256,uint256)": EventFragment;
   };
 
   getEvent(nameOrSignatureOrTopic: "Approval"): EventFragment;
   getEvent(nameOrSignatureOrTopic: "Deposit"): EventFragment;
   getEvent(nameOrSignatureOrTopic: "Rebalance"): EventFragment;
+  getEvent(nameOrSignatureOrTopic: "SetFee"): EventFragment;
   getEvent(nameOrSignatureOrTopic: "Transfer"): EventFragment;
   getEvent(nameOrSignatureOrTopic: "Withdraw"): EventFragment;
+  getEvent(nameOrSignatureOrTopic: "ZeroBurn"): EventFragment;
 }
 
 export type ApprovalEvent = TypedEvent<
@@ -411,6 +423,8 @@ export type RebalanceEvent = TypedEvent<
   }
 >;
 
+export type SetFeeEvent = TypedEvent<[number] & { newFee: number }>;
+
 export type TransferEvent = TypedEvent<
   [string, string, BigNumber] & { from: string; to: string; value: BigNumber }
 >;
@@ -422,6 +436,14 @@ export type WithdrawEvent = TypedEvent<
     shares: BigNumber;
     amount0: BigNumber;
     amount1: BigNumber;
+  }
+>;
+
+export type ZeroBurnEvent = TypedEvent<
+  [number, BigNumber, BigNumber] & {
+    fee: number;
+    fees0: BigNumber;
+    fees1: BigNumber;
   }
 >;
 
@@ -473,14 +495,9 @@ export class Hypervisor extends BaseContract {
 
     PRECISION(overrides?: CallOverrides): Promise<[BigNumber]>;
 
-    addBaseLiquidity(
-      amount0: BigNumberish,
-      amount1: BigNumberish,
-      inMin: [BigNumberish, BigNumberish],
-      overrides?: Overrides & { from?: string | Promise<string> }
-    ): Promise<ContractTransaction>;
-
-    addLimitLiquidity(
+    addLiquidity(
+      tickLower: BigNumberish,
+      tickUpper: BigNumberish,
       amount0: BigNumberish,
       amount1: BigNumberish,
       inMin: [BigNumberish, BigNumberish],
@@ -538,6 +555,8 @@ export class Hypervisor extends BaseContract {
     directDeposit(overrides?: CallOverrides): Promise<[boolean]>;
 
     fee(overrides?: CallOverrides): Promise<[number]>;
+
+    feeRecipient(overrides?: CallOverrides): Promise<[string]>;
 
     getBasePosition(
       overrides?: CallOverrides
@@ -597,8 +616,10 @@ export class Hypervisor extends BaseContract {
     pool(overrides?: CallOverrides): Promise<[string]>;
 
     pullLiquidity(
+      tickLower: BigNumberish,
+      tickUpper: BigNumberish,
       shares: BigNumberish,
-      minAmounts: [BigNumberish, BigNumberish, BigNumberish, BigNumberish],
+      amountMin: [BigNumberish, BigNumberish],
       overrides?: Overrides & { from?: string | Promise<string> }
     ): Promise<ContractTransaction>;
 
@@ -607,7 +628,7 @@ export class Hypervisor extends BaseContract {
       _baseUpper: BigNumberish,
       _limitLower: BigNumberish,
       _limitUpper: BigNumberish,
-      feeRecipient: string,
+      _feeRecipient: string,
       inMin: [BigNumberish, BigNumberish, BigNumberish, BigNumberish],
       outMin: [BigNumberish, BigNumberish, BigNumberish, BigNumberish],
       overrides?: Overrides & { from?: string | Promise<string> }
@@ -681,14 +702,9 @@ export class Hypervisor extends BaseContract {
 
   PRECISION(overrides?: CallOverrides): Promise<BigNumber>;
 
-  addBaseLiquidity(
-    amount0: BigNumberish,
-    amount1: BigNumberish,
-    inMin: [BigNumberish, BigNumberish],
-    overrides?: Overrides & { from?: string | Promise<string> }
-  ): Promise<ContractTransaction>;
-
-  addLimitLiquidity(
+  addLiquidity(
+    tickLower: BigNumberish,
+    tickUpper: BigNumberish,
     amount0: BigNumberish,
     amount1: BigNumberish,
     inMin: [BigNumberish, BigNumberish],
@@ -744,6 +760,8 @@ export class Hypervisor extends BaseContract {
   directDeposit(overrides?: CallOverrides): Promise<boolean>;
 
   fee(overrides?: CallOverrides): Promise<number>;
+
+  feeRecipient(overrides?: CallOverrides): Promise<string>;
 
   getBasePosition(
     overrides?: CallOverrides
@@ -801,8 +819,10 @@ export class Hypervisor extends BaseContract {
   pool(overrides?: CallOverrides): Promise<string>;
 
   pullLiquidity(
+    tickLower: BigNumberish,
+    tickUpper: BigNumberish,
     shares: BigNumberish,
-    minAmounts: [BigNumberish, BigNumberish, BigNumberish, BigNumberish],
+    amountMin: [BigNumberish, BigNumberish],
     overrides?: Overrides & { from?: string | Promise<string> }
   ): Promise<ContractTransaction>;
 
@@ -811,7 +831,7 @@ export class Hypervisor extends BaseContract {
     _baseUpper: BigNumberish,
     _limitLower: BigNumberish,
     _limitUpper: BigNumberish,
-    feeRecipient: string,
+    _feeRecipient: string,
     inMin: [BigNumberish, BigNumberish, BigNumberish, BigNumberish],
     outMin: [BigNumberish, BigNumberish, BigNumberish, BigNumberish],
     overrides?: Overrides & { from?: string | Promise<string> }
@@ -885,14 +905,9 @@ export class Hypervisor extends BaseContract {
 
     PRECISION(overrides?: CallOverrides): Promise<BigNumber>;
 
-    addBaseLiquidity(
-      amount0: BigNumberish,
-      amount1: BigNumberish,
-      inMin: [BigNumberish, BigNumberish],
-      overrides?: CallOverrides
-    ): Promise<void>;
-
-    addLimitLiquidity(
+    addLiquidity(
+      tickLower: BigNumberish,
+      tickUpper: BigNumberish,
       amount0: BigNumberish,
       amount1: BigNumberish,
       inMin: [BigNumberish, BigNumberish],
@@ -956,6 +971,8 @@ export class Hypervisor extends BaseContract {
 
     fee(overrides?: CallOverrides): Promise<number>;
 
+    feeRecipient(overrides?: CallOverrides): Promise<string>;
+
     getBasePosition(
       overrides?: CallOverrides
     ): Promise<
@@ -1014,16 +1031,13 @@ export class Hypervisor extends BaseContract {
     pool(overrides?: CallOverrides): Promise<string>;
 
     pullLiquidity(
+      tickLower: BigNumberish,
+      tickUpper: BigNumberish,
       shares: BigNumberish,
-      minAmounts: [BigNumberish, BigNumberish, BigNumberish, BigNumberish],
+      amountMin: [BigNumberish, BigNumberish],
       overrides?: CallOverrides
     ): Promise<
-      [BigNumber, BigNumber, BigNumber, BigNumber] & {
-        base0: BigNumber;
-        base1: BigNumber;
-        limit0: BigNumber;
-        limit1: BigNumber;
-      }
+      [BigNumber, BigNumber] & { amount0: BigNumber; amount1: BigNumber }
     >;
 
     rebalance(
@@ -1031,7 +1045,7 @@ export class Hypervisor extends BaseContract {
       _baseUpper: BigNumberish,
       _limitLower: BigNumberish,
       _limitUpper: BigNumberish,
-      feeRecipient: string,
+      _feeRecipient: string,
       inMin: [BigNumberish, BigNumberish, BigNumberish, BigNumberish],
       outMin: [BigNumberish, BigNumberish, BigNumberish, BigNumberish],
       overrides?: CallOverrides
@@ -1184,6 +1198,12 @@ export class Hypervisor extends BaseContract {
       }
     >;
 
+    "SetFee(uint8)"(
+      newFee?: null
+    ): TypedEventFilter<[number], { newFee: number }>;
+
+    SetFee(newFee?: null): TypedEventFilter<[number], { newFee: number }>;
+
     "Transfer(address,address,uint256)"(
       from?: string | null,
       to?: string | null,
@@ -1235,6 +1255,24 @@ export class Hypervisor extends BaseContract {
         amount1: BigNumber;
       }
     >;
+
+    "ZeroBurn(uint8,uint256,uint256)"(
+      fee?: null,
+      fees0?: null,
+      fees1?: null
+    ): TypedEventFilter<
+      [number, BigNumber, BigNumber],
+      { fee: number; fees0: BigNumber; fees1: BigNumber }
+    >;
+
+    ZeroBurn(
+      fee?: null,
+      fees0?: null,
+      fees1?: null
+    ): TypedEventFilter<
+      [number, BigNumber, BigNumber],
+      { fee: number; fees0: BigNumber; fees1: BigNumber }
+    >;
   };
 
   estimateGas: {
@@ -1242,14 +1280,9 @@ export class Hypervisor extends BaseContract {
 
     PRECISION(overrides?: CallOverrides): Promise<BigNumber>;
 
-    addBaseLiquidity(
-      amount0: BigNumberish,
-      amount1: BigNumberish,
-      inMin: [BigNumberish, BigNumberish],
-      overrides?: Overrides & { from?: string | Promise<string> }
-    ): Promise<BigNumber>;
-
-    addLimitLiquidity(
+    addLiquidity(
+      tickLower: BigNumberish,
+      tickUpper: BigNumberish,
       amount0: BigNumberish,
       amount1: BigNumberish,
       inMin: [BigNumberish, BigNumberish],
@@ -1306,6 +1339,8 @@ export class Hypervisor extends BaseContract {
 
     fee(overrides?: CallOverrides): Promise<BigNumber>;
 
+    feeRecipient(overrides?: CallOverrides): Promise<BigNumber>;
+
     getBasePosition(overrides?: CallOverrides): Promise<BigNumber>;
 
     getLimitPosition(overrides?: CallOverrides): Promise<BigNumber>;
@@ -1344,8 +1379,10 @@ export class Hypervisor extends BaseContract {
     pool(overrides?: CallOverrides): Promise<BigNumber>;
 
     pullLiquidity(
+      tickLower: BigNumberish,
+      tickUpper: BigNumberish,
       shares: BigNumberish,
-      minAmounts: [BigNumberish, BigNumberish, BigNumberish, BigNumberish],
+      amountMin: [BigNumberish, BigNumberish],
       overrides?: Overrides & { from?: string | Promise<string> }
     ): Promise<BigNumber>;
 
@@ -1354,7 +1391,7 @@ export class Hypervisor extends BaseContract {
       _baseUpper: BigNumberish,
       _limitLower: BigNumberish,
       _limitUpper: BigNumberish,
-      feeRecipient: string,
+      _feeRecipient: string,
       inMin: [BigNumberish, BigNumberish, BigNumberish, BigNumberish],
       outMin: [BigNumberish, BigNumberish, BigNumberish, BigNumberish],
       overrides?: Overrides & { from?: string | Promise<string> }
@@ -1429,14 +1466,9 @@ export class Hypervisor extends BaseContract {
 
     PRECISION(overrides?: CallOverrides): Promise<PopulatedTransaction>;
 
-    addBaseLiquidity(
-      amount0: BigNumberish,
-      amount1: BigNumberish,
-      inMin: [BigNumberish, BigNumberish],
-      overrides?: Overrides & { from?: string | Promise<string> }
-    ): Promise<PopulatedTransaction>;
-
-    addLimitLiquidity(
+    addLiquidity(
+      tickLower: BigNumberish,
+      tickUpper: BigNumberish,
       amount0: BigNumberish,
       amount1: BigNumberish,
       inMin: [BigNumberish, BigNumberish],
@@ -1496,6 +1528,8 @@ export class Hypervisor extends BaseContract {
 
     fee(overrides?: CallOverrides): Promise<PopulatedTransaction>;
 
+    feeRecipient(overrides?: CallOverrides): Promise<PopulatedTransaction>;
+
     getBasePosition(overrides?: CallOverrides): Promise<PopulatedTransaction>;
 
     getLimitPosition(overrides?: CallOverrides): Promise<PopulatedTransaction>;
@@ -1537,8 +1571,10 @@ export class Hypervisor extends BaseContract {
     pool(overrides?: CallOverrides): Promise<PopulatedTransaction>;
 
     pullLiquidity(
+      tickLower: BigNumberish,
+      tickUpper: BigNumberish,
       shares: BigNumberish,
-      minAmounts: [BigNumberish, BigNumberish, BigNumberish, BigNumberish],
+      amountMin: [BigNumberish, BigNumberish],
       overrides?: Overrides & { from?: string | Promise<string> }
     ): Promise<PopulatedTransaction>;
 
@@ -1547,7 +1583,7 @@ export class Hypervisor extends BaseContract {
       _baseUpper: BigNumberish,
       _limitLower: BigNumberish,
       _limitUpper: BigNumberish,
-      feeRecipient: string,
+      _feeRecipient: string,
       inMin: [BigNumberish, BigNumberish, BigNumberish, BigNumberish],
       outMin: [BigNumberish, BigNumberish, BigNumberish, BigNumberish],
       overrides?: Overrides & { from?: string | Promise<string> }

@@ -1,10 +1,9 @@
-import { formatEther} from 'ethers/lib/utils'
+import { formatEther, formatUnits, parseUnits} from 'ethers/lib/utils'
 import { task } from 'hardhat/config'
 import { deployContract } from './utils'
 
 task('deploy-swap', 'Deploy Swap contract')
   .addParam('owner', "your address")
-  .addParam('token', "visr address")
   .setAction(async (cliArgs, { ethers, run, network }) => {
     // compile
 
@@ -18,14 +17,13 @@ task('deploy-swap', 'Deploy Swap contract')
     console.log('  ETH', formatEther(await signer.getBalance()))
 
     const _owner = ethers.utils.getAddress(cliArgs.owner);
-    const _VISR = ethers.utils.getAddress(cliArgs.token);
+
 
     // TODO cli args
     // goerli
     const args = {
-      _owner,
-      _router: "0xE592427A0AEce92De3Edee1F18E0157C05861564",
-      _VISR,
+      owner: cliArgs.owner,
+      router: "0xE592427A0AEce92De3Edee1F18E0157C05861564"
     };
 
     console.log('Network')
@@ -37,13 +35,13 @@ task('deploy-swap', 'Deploy Swap contract')
       'Swap',
       await ethers.getContractFactory('Swap'),
       signer,
-      Object.values(args)
-    )
+      [args.owner, args.router]
+    );
 
     await swap.deployTransaction.wait(5)
     await run('verify:verify', {
       address: swap.address,
-      constructorArguments: Object.values(args),
+      constructorArguments: [args.owner, args.router],
     })
 
   }); 

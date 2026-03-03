@@ -11,10 +11,14 @@ import "@openzeppelin/contracts/drafts/ERC20Permit.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 import "@uniswap/v3-core/contracts/interfaces/callback/IUniswapV3MintCallback.sol";
-import "@uniswap/v3-core/contracts/interfaces/IUniswapV3Pool.sol";
 import "@uniswap/v3-core/contracts/libraries/TickMath.sol";
 import "@uniswap/v3-core/contracts/libraries/FullMath.sol";
 import "@uniswap/v3-periphery/contracts/libraries/LiquidityAmounts.sol";
+
+// Hedera-specific interfaces with payable mint and mintFee
+import "./interfaces/hedera/IHederaUniswapV3Pool.sol";
+import "./interfaces/hedera/IHederaUniswapV3Factory.sol";
+import "./interfaces/hedera/IExchangeRate.sol";
 
 /// @title Hypervisor v1.3
 /// @notice A Uniswap V2-like interface with fungible liquidity to Uniswap V3
@@ -24,10 +28,10 @@ contract Hypervisor is IUniswapV3MintCallback, ERC20Permit, ReentrancyGuard {
     using SafeMath for uint256;
     using SignedSafeMath for int256;
 
-    IUniswapV3Pool public pool;
+    IHederaUniswapV3Pool public pool;
     IERC20 public token0;
     IERC20 public token1;
-    uint8 public fee = 20;
+    uint8 public fee = 5;
     int24 public tickSpacing;
 
     int24 public baseLower;
@@ -44,8 +48,12 @@ contract Hypervisor is IUniswapV3MintCallback, ERC20Permit, ReentrancyGuard {
     bool public directDeposit; /// enter uni on deposit (avoid if client uses public rpc)
 
     uint256 public constant PRECISION = 1e36;
+    address public constant EXCHANGE_RATE_PRECOMPILE = address(0x168);
 
     bool mintCalled;
+
+    /// @notice Allow contract to receive HBAR for mint fees
+    receive() external payable {}
 
    event Deposit(
         address indexed sender,
@@ -86,7 +94,7 @@ contract Hypervisor is IUniswapV3MintCallback, ERC20Permit, ReentrancyGuard {
     ) ERC20Permit(name) ERC20(name, symbol) {
         require(_pool != address(0));
         require(_owner != address(0));
-        pool = IUniswapV3Pool(_pool);
+        pool = IHederaUniswapV3Pool(_pool);
         token0 = IERC20(pool.token0());
         token1 = IERC20(pool.token1());
         require(address(token0) != address(0));
@@ -120,9 +128,9 @@ contract Hypervisor is IUniswapV3MintCallback, ERC20Permit, ReentrancyGuard {
         require(msg.sender == whitelistedAddress, "WHE");
 
         /// update fees
-        zeroBurn();
+        _zeroBurn();
 
-        uint160 sqrtPrice = TickMath.getSqrtRatioAtTick(currentTick());
+        (uint160 sqrtPrice, , , , , , ) = pool.slot0();
         uint256 price = FullMath.mulDiv(uint256(sqrtPrice).mul(uint256(sqrtPrice)), PRECISION, 2**(96 * 2));
 
         (uint256 pool0, uint256 pool1) = getTotalAmounts();
@@ -163,24 +171,52 @@ contract Hypervisor is IUniswapV3MintCallback, ERC20Permit, ReentrancyGuard {
         require(maxTotalSupply == 0 || total <= maxTotalSupply, "max");
     }
 
-    function _zeroBurn(int24 tickLower, int24 tickUpper) internal returns(uint128 liquidity) {
-      /// update fees for inclusion
-      (liquidity, ,) = _position(tickLower, tickUpper);
-      if(liquidity > 0) {
-        pool.burn(tickLower, tickUpper, 0);
-        (uint256 owed0, uint256 owed1) = pool.collect(address(this), tickLower, tickUpper, type(uint128).max, type(uint128).max);
-        emit ZeroBurn(fee, owed0, owed1);
-        if (owed0.div(fee) > 0 && token0.balanceOf(address(this)) > 0) token0.safeTransfer(feeRecipient, owed0.div(fee));
-        if (owed1.div(fee) > 0 && token1.balanceOf(address(this)) > 0) token1.safeTransfer(feeRecipient, owed1.div(fee));
-      }      
+    /// @notice Update fees of both base and limit positions
+    /// @return baseLiquidity Fee of base position  
+    /// @return limitLiquidity Fee of limit position
+    function _zeroBurn() internal returns(uint128 baseLiquidity, uint128 limitLiquidity) {
+        uint256 totalOwed0 = 0;
+        uint256 totalOwed1 = 0;
+        
+        // Handle base position
+        (baseLiquidity, ,) = _position(baseLower, baseUpper);
+        if(baseLiquidity > 0) {
+            pool.burn(baseLower, baseUpper, 0);
+            (uint256 owed0, uint256 owed1) = pool.collect(address(this), baseLower, baseUpper, type(uint128).max, type(uint128).max);
+            totalOwed0 = totalOwed0.add(owed0);
+            totalOwed1 = totalOwed1.add(owed1);
+        }
+
+        // Handle limit position  
+        (limitLiquidity, ,) = _position(limitLower, limitUpper);
+        if(limitLiquidity > 0) {
+            pool.burn(limitLower, limitUpper, 0);
+            (uint256 owed0, uint256 owed1) = pool.collect(address(this), limitLower, limitUpper, type(uint128).max, type(uint128).max);
+            totalOwed0 = totalOwed0.add(owed0);
+            totalOwed1 = totalOwed1.add(owed1);
+        }
+        
+        // Emit once with total fees
+        emit ZeroBurn(fee, totalOwed0, totalOwed1);
+        
+        // Transfer fees once per token
+        uint256 feeAmount0 = totalOwed0.div(fee);
+        uint256 feeAmount1 = totalOwed1.div(fee);
+        if (feeAmount0 > 0 && token0.balanceOf(address(this)) > 0) {
+            token0.safeTransfer(feeRecipient, feeAmount0);
+        }
+        if (feeAmount1 > 0 && token1.balanceOf(address(this)) > 0) {
+            token1.safeTransfer(feeRecipient, feeAmount1);
+        }
     }
 
-    /// @notice Update fees of the positions
-    /// @return baseLiquidity Fee of base position
-    /// @return limitLiquidity Fee of limit position
-    function zeroBurn() internal returns(uint128 baseLiquidity, uint128 limitLiquidity) {
-      baseLiquidity = _zeroBurn(baseLower, baseUpper);
-      limitLiquidity = _zeroBurn(limitLower, limitUpper); 
+    /// @notice External function to collect and distribute fees from active NFT positions
+    /// @dev Can only be called by whitelisted address
+    /// @return owed0 Total amount of token0 fees collected from both positions
+    /// @return owed1 Total amount of token1 fees collected from both positions  
+    function zeroBurn() external returns(uint256 owed0, uint256 owed1) {
+        require(msg.sender == whitelistedAddress);
+        return _zeroBurn();
     }
 
     /// @notice Pull liquidity tokens from liquidity and receive the tokens
@@ -196,7 +232,7 @@ contract Hypervisor is IUniswapV3MintCallback, ERC20Permit, ReentrancyGuard {
         uint128 shares,
         uint256[2] memory amountMin
     ) external onlyOwner returns (uint256 amount0, uint256 amount1) {
-        _zeroBurn(tickLower, tickUpper);
+        _zeroBurn();
         (amount0, amount1) = _burnLiquidity(
           tickLower,
           tickUpper,
@@ -224,7 +260,7 @@ contract Hypervisor is IUniswapV3MintCallback, ERC20Permit, ReentrancyGuard {
         require(to != address(0), "to");
 
         /// update fees
-        zeroBurn();
+        _zeroBurn();
 
         /// Withdraw liquidity from Uniswap pool
         (uint256 base0, uint256 base1) = _burnLiquidity(
@@ -276,7 +312,7 @@ contract Hypervisor is IUniswapV3MintCallback, ERC20Permit, ReentrancyGuard {
         address _feeRecipient,
         uint256[4] memory inMin, 
         uint256[4] memory outMin
-    ) nonReentrant external onlyOwner {
+    ) nonReentrant external payable onlyOwner {
         require(
             _baseLower < _baseUpper &&
                 _baseLower % tickSpacing == 0 &&
@@ -295,7 +331,7 @@ contract Hypervisor is IUniswapV3MintCallback, ERC20Permit, ReentrancyGuard {
         feeRecipient = _feeRecipient;
 
         /// update fees
-        zeroBurn();
+        _zeroBurn();
 
         /// Withdraw all liquidity and collect all fees from Uniswap pool
         (uint128 baseLiquidity, uint256 feesLimit0, uint256 feesLimit1) = _position(baseLower, baseUpper);
@@ -347,7 +383,7 @@ contract Hypervisor is IUniswapV3MintCallback, ERC20Permit, ReentrancyGuard {
         uint128 limitToken1Owed 
     ) {
         // update fees for compounding
-        zeroBurn();
+        _zeroBurn();
 
         uint128 liquidity = _liquidityForAmounts(
           baseLower,
@@ -374,7 +410,7 @@ contract Hypervisor is IUniswapV3MintCallback, ERC20Permit, ReentrancyGuard {
         uint256 amount1,
         uint256[2] memory inMin
     ) public onlyOwner {        
-        _zeroBurn(tickLower, tickUpper);
+        _zeroBurn();
         uint128 liquidity = _liquidityForAmounts(tickLower, tickUpper, amount0, amount1);
         _mintLiquidity(tickLower, tickUpper, liquidity, address(this), inMin[0], inMin[1]);
     }
@@ -396,7 +432,8 @@ contract Hypervisor is IUniswapV3MintCallback, ERC20Permit, ReentrancyGuard {
     ) internal {
         if (liquidity > 0) {
             mintCalled = true;
-            (uint256 amount0, uint256 amount1) = pool.mint(
+            uint256 mintFee = getMintFee();
+            (uint256 amount0, uint256 amount1) = pool.mint{value: mintFee}(
                 address(this),
                 tickLower,
                 tickUpper,
@@ -593,6 +630,19 @@ contract Hypervisor is IUniswapV3MintCallback, ERC20Permit, ReentrancyGuard {
     function _uint128Safe(uint256 x) internal pure returns (uint128) {
         assert(x <= type(uint128).max);
         return uint128(x);
+    }
+
+    /// @notice Get the required mint fee in tinybars from Hedera precompile
+    function getMintFee() public returns (uint256) {
+        address factory = pool.factory();
+        uint256 mintFeeTinycents = IHederaUniswapV3Factory(factory).mintFee();
+        if (mintFeeTinycents == 0) return 0;
+
+        (bool success, bytes memory result) = EXCHANGE_RATE_PRECOMPILE.call(
+            abi.encodeWithSelector(IExchangeRate.tinycentsToTinybars.selector, mintFeeTinycents)
+        );
+        require(success, "Exchange rate conversion failed");
+        return abi.decode(result, (uint256));
     }
 
     /// @param _address Array of addresses to be appended

@@ -45,9 +45,9 @@ interface IHypervisor {
     int24 _limitLower,
     int24 _limitUpper,
     address _feeRecipient,
-    uint256[4] memory minIn, 
+    uint256[4] memory minIn,
     uint256[4] memory outMin
-    ) external;
+    ) external payable;
 
   function addBaseLiquidity(
     uint256 amount0, 
@@ -89,6 +89,9 @@ interface IHypervisor {
       uint256[2] memory inMin
   ) external;
 
+  function zeroBurn() external returns (uint256 owed0, uint256 owed1);
+  
+  function fee() external view returns (uint8);
 
   function pool() external view returns (IUniswapV3Pool);
 
@@ -133,5 +136,7 @@ interface IHypervisor {
   function removeWhitelisted() external;
 
   function transferOwnership(address newOwner) external;
+
+  function toggleDirectDeposit() external;
 
 }

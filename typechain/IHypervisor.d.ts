@@ -21,9 +21,9 @@ import type { TypedEventFilter, TypedEvent, TypedListener } from "./common";
 
 interface IHypervisorInterface extends ethers.utils.Interface {
   functions: {
-    "PRECISION()": FunctionFragment;
     "addBaseLiquidity(uint256,uint256,uint256[2])": FunctionFragment;
     "addLimitLiquidity(uint256,uint256,uint256[2])": FunctionFragment;
+    "addLiquidity(int24,int24,uint256,uint256,uint256[2])": FunctionFragment;
     "approve(address,uint256)": FunctionFragment;
     "balanceOf(address)": FunctionFragment;
     "baseLower()": FunctionFragment;
@@ -44,6 +44,7 @@ interface IHypervisorInterface extends ethers.utils.Interface {
     "setFee(uint8)": FunctionFragment;
     "setWhitelist(address)": FunctionFragment;
     "tickSpacing()": FunctionFragment;
+    "toggleDirectDeposit()": FunctionFragment;
     "token0()": FunctionFragment;
     "token1()": FunctionFragment;
     "totalSupply()": FunctionFragment;
@@ -53,7 +54,6 @@ interface IHypervisorInterface extends ethers.utils.Interface {
     "withdraw(uint256,address,address,uint256[4])": FunctionFragment;
   };
 
-  encodeFunctionData(functionFragment: "PRECISION", values?: undefined): string;
   encodeFunctionData(
     functionFragment: "addBaseLiquidity",
     values: [BigNumberish, BigNumberish, [BigNumberish, BigNumberish]]
@@ -61,6 +61,16 @@ interface IHypervisorInterface extends ethers.utils.Interface {
   encodeFunctionData(
     functionFragment: "addLimitLiquidity",
     values: [BigNumberish, BigNumberish, [BigNumberish, BigNumberish]]
+  ): string;
+  encodeFunctionData(
+    functionFragment: "addLiquidity",
+    values: [
+      BigNumberish,
+      BigNumberish,
+      BigNumberish,
+      BigNumberish,
+      [BigNumberish, BigNumberish]
+    ]
   ): string;
   encodeFunctionData(
     functionFragment: "approve",
@@ -147,6 +157,10 @@ interface IHypervisorInterface extends ethers.utils.Interface {
     functionFragment: "tickSpacing",
     values?: undefined
   ): string;
+  encodeFunctionData(
+    functionFragment: "toggleDirectDeposit",
+    values?: undefined
+  ): string;
   encodeFunctionData(functionFragment: "token0", values?: undefined): string;
   encodeFunctionData(functionFragment: "token1", values?: undefined): string;
   encodeFunctionData(
@@ -175,13 +189,16 @@ interface IHypervisorInterface extends ethers.utils.Interface {
     ]
   ): string;
 
-  decodeFunctionResult(functionFragment: "PRECISION", data: BytesLike): Result;
   decodeFunctionResult(
     functionFragment: "addBaseLiquidity",
     data: BytesLike
   ): Result;
   decodeFunctionResult(
     functionFragment: "addLimitLiquidity",
+    data: BytesLike
+  ): Result;
+  decodeFunctionResult(
+    functionFragment: "addLiquidity",
     data: BytesLike
   ): Result;
   decodeFunctionResult(functionFragment: "approve", data: BytesLike): Result;
@@ -229,6 +246,10 @@ interface IHypervisorInterface extends ethers.utils.Interface {
   ): Result;
   decodeFunctionResult(
     functionFragment: "tickSpacing",
+    data: BytesLike
+  ): Result;
+  decodeFunctionResult(
+    functionFragment: "toggleDirectDeposit",
     data: BytesLike
   ): Result;
   decodeFunctionResult(functionFragment: "token0", data: BytesLike): Result;
@@ -295,8 +316,6 @@ export class IHypervisor extends BaseContract {
   interface: IHypervisorInterface;
 
   functions: {
-    PRECISION(overrides?: CallOverrides): Promise<[BigNumber]>;
-
     addBaseLiquidity(
       amount0: BigNumberish,
       amount1: BigNumberish,
@@ -308,6 +327,15 @@ export class IHypervisor extends BaseContract {
       amount0: BigNumberish,
       amount1: BigNumberish,
       minIn: [BigNumberish, BigNumberish],
+      overrides?: Overrides & { from?: string | Promise<string> }
+    ): Promise<ContractTransaction>;
+
+    addLiquidity(
+      tickLower: BigNumberish,
+      tickUpper: BigNumberish,
+      amount0: BigNumberish,
+      amount1: BigNumberish,
+      inMin: [BigNumberish, BigNumberish],
       overrides?: Overrides & { from?: string | Promise<string> }
     ): Promise<ContractTransaction>;
 
@@ -371,9 +399,17 @@ export class IHypervisor extends BaseContract {
 
     pool(overrides?: CallOverrides): Promise<[string]>;
 
-    pullLiquidity(
+    "pullLiquidity(uint256,uint256[4])"(
       shares: BigNumberish,
       minAmounts: [BigNumberish, BigNumberish, BigNumberish, BigNumberish],
+      overrides?: Overrides & { from?: string | Promise<string> }
+    ): Promise<ContractTransaction>;
+
+    "pullLiquidity(int24,int24,uint128,uint256[2])"(
+      tickLower: BigNumberish,
+      tickUpper: BigNumberish,
+      shares: BigNumberish,
+      amountMin: [BigNumberish, BigNumberish],
       overrides?: Overrides & { from?: string | Promise<string> }
     ): Promise<ContractTransaction>;
 
@@ -405,6 +441,10 @@ export class IHypervisor extends BaseContract {
     tickSpacing(
       overrides?: CallOverrides
     ): Promise<[number] & { spacing: number }>;
+
+    toggleDirectDeposit(
+      overrides?: Overrides & { from?: string | Promise<string> }
+    ): Promise<ContractTransaction>;
 
     token0(overrides?: CallOverrides): Promise<[string]>;
 
@@ -439,8 +479,6 @@ export class IHypervisor extends BaseContract {
     ): Promise<ContractTransaction>;
   };
 
-  PRECISION(overrides?: CallOverrides): Promise<BigNumber>;
-
   addBaseLiquidity(
     amount0: BigNumberish,
     amount1: BigNumberish,
@@ -452,6 +490,15 @@ export class IHypervisor extends BaseContract {
     amount0: BigNumberish,
     amount1: BigNumberish,
     minIn: [BigNumberish, BigNumberish],
+    overrides?: Overrides & { from?: string | Promise<string> }
+  ): Promise<ContractTransaction>;
+
+  addLiquidity(
+    tickLower: BigNumberish,
+    tickUpper: BigNumberish,
+    amount0: BigNumberish,
+    amount1: BigNumberish,
+    inMin: [BigNumberish, BigNumberish],
     overrides?: Overrides & { from?: string | Promise<string> }
   ): Promise<ContractTransaction>;
 
@@ -511,9 +558,17 @@ export class IHypervisor extends BaseContract {
 
   pool(overrides?: CallOverrides): Promise<string>;
 
-  pullLiquidity(
+  "pullLiquidity(uint256,uint256[4])"(
     shares: BigNumberish,
     minAmounts: [BigNumberish, BigNumberish, BigNumberish, BigNumberish],
+    overrides?: Overrides & { from?: string | Promise<string> }
+  ): Promise<ContractTransaction>;
+
+  "pullLiquidity(int24,int24,uint128,uint256[2])"(
+    tickLower: BigNumberish,
+    tickUpper: BigNumberish,
+    shares: BigNumberish,
+    amountMin: [BigNumberish, BigNumberish],
     overrides?: Overrides & { from?: string | Promise<string> }
   ): Promise<ContractTransaction>;
 
@@ -543,6 +598,10 @@ export class IHypervisor extends BaseContract {
   ): Promise<ContractTransaction>;
 
   tickSpacing(overrides?: CallOverrides): Promise<number>;
+
+  toggleDirectDeposit(
+    overrides?: Overrides & { from?: string | Promise<string> }
+  ): Promise<ContractTransaction>;
 
   token0(overrides?: CallOverrides): Promise<string>;
 
@@ -577,8 +636,6 @@ export class IHypervisor extends BaseContract {
   ): Promise<ContractTransaction>;
 
   callStatic: {
-    PRECISION(overrides?: CallOverrides): Promise<BigNumber>;
-
     addBaseLiquidity(
       amount0: BigNumberish,
       amount1: BigNumberish,
@@ -590,6 +647,15 @@ export class IHypervisor extends BaseContract {
       amount0: BigNumberish,
       amount1: BigNumberish,
       minIn: [BigNumberish, BigNumberish],
+      overrides?: CallOverrides
+    ): Promise<void>;
+
+    addLiquidity(
+      tickLower: BigNumberish,
+      tickUpper: BigNumberish,
+      amount0: BigNumberish,
+      amount1: BigNumberish,
+      inMin: [BigNumberish, BigNumberish],
       overrides?: CallOverrides
     ): Promise<void>;
 
@@ -665,7 +731,7 @@ export class IHypervisor extends BaseContract {
 
     pool(overrides?: CallOverrides): Promise<string>;
 
-    pullLiquidity(
+    "pullLiquidity(uint256,uint256[4])"(
       shares: BigNumberish,
       minAmounts: [BigNumberish, BigNumberish, BigNumberish, BigNumberish],
       overrides?: CallOverrides
@@ -677,6 +743,14 @@ export class IHypervisor extends BaseContract {
         limit1: BigNumber;
       }
     >;
+
+    "pullLiquidity(int24,int24,uint128,uint256[2])"(
+      tickLower: BigNumberish,
+      tickUpper: BigNumberish,
+      shares: BigNumberish,
+      amountMin: [BigNumberish, BigNumberish],
+      overrides?: CallOverrides
+    ): Promise<[BigNumber, BigNumber] & { base0: BigNumber; base1: BigNumber }>;
 
     rebalance(
       _baseLower: BigNumberish,
@@ -696,6 +770,8 @@ export class IHypervisor extends BaseContract {
     setWhitelist(_address: string, overrides?: CallOverrides): Promise<void>;
 
     tickSpacing(overrides?: CallOverrides): Promise<number>;
+
+    toggleDirectDeposit(overrides?: CallOverrides): Promise<void>;
 
     token0(overrides?: CallOverrides): Promise<string>;
 
@@ -733,8 +809,6 @@ export class IHypervisor extends BaseContract {
   filters: {};
 
   estimateGas: {
-    PRECISION(overrides?: CallOverrides): Promise<BigNumber>;
-
     addBaseLiquidity(
       amount0: BigNumberish,
       amount1: BigNumberish,
@@ -746,6 +820,15 @@ export class IHypervisor extends BaseContract {
       amount0: BigNumberish,
       amount1: BigNumberish,
       minIn: [BigNumberish, BigNumberish],
+      overrides?: Overrides & { from?: string | Promise<string> }
+    ): Promise<BigNumber>;
+
+    addLiquidity(
+      tickLower: BigNumberish,
+      tickUpper: BigNumberish,
+      amount0: BigNumberish,
+      amount1: BigNumberish,
+      inMin: [BigNumberish, BigNumberish],
       overrides?: Overrides & { from?: string | Promise<string> }
     ): Promise<BigNumber>;
 
@@ -795,9 +878,17 @@ export class IHypervisor extends BaseContract {
 
     pool(overrides?: CallOverrides): Promise<BigNumber>;
 
-    pullLiquidity(
+    "pullLiquidity(uint256,uint256[4])"(
       shares: BigNumberish,
       minAmounts: [BigNumberish, BigNumberish, BigNumberish, BigNumberish],
+      overrides?: Overrides & { from?: string | Promise<string> }
+    ): Promise<BigNumber>;
+
+    "pullLiquidity(int24,int24,uint128,uint256[2])"(
+      tickLower: BigNumberish,
+      tickUpper: BigNumberish,
+      shares: BigNumberish,
+      amountMin: [BigNumberish, BigNumberish],
       overrides?: Overrides & { from?: string | Promise<string> }
     ): Promise<BigNumber>;
 
@@ -827,6 +918,10 @@ export class IHypervisor extends BaseContract {
     ): Promise<BigNumber>;
 
     tickSpacing(overrides?: CallOverrides): Promise<BigNumber>;
+
+    toggleDirectDeposit(
+      overrides?: Overrides & { from?: string | Promise<string> }
+    ): Promise<BigNumber>;
 
     token0(overrides?: CallOverrides): Promise<BigNumber>;
 
@@ -862,8 +957,6 @@ export class IHypervisor extends BaseContract {
   };
 
   populateTransaction: {
-    PRECISION(overrides?: CallOverrides): Promise<PopulatedTransaction>;
-
     addBaseLiquidity(
       amount0: BigNumberish,
       amount1: BigNumberish,
@@ -875,6 +968,15 @@ export class IHypervisor extends BaseContract {
       amount0: BigNumberish,
       amount1: BigNumberish,
       minIn: [BigNumberish, BigNumberish],
+      overrides?: Overrides & { from?: string | Promise<string> }
+    ): Promise<PopulatedTransaction>;
+
+    addLiquidity(
+      tickLower: BigNumberish,
+      tickUpper: BigNumberish,
+      amount0: BigNumberish,
+      amount1: BigNumberish,
+      inMin: [BigNumberish, BigNumberish],
       overrides?: Overrides & { from?: string | Promise<string> }
     ): Promise<PopulatedTransaction>;
 
@@ -927,9 +1029,17 @@ export class IHypervisor extends BaseContract {
 
     pool(overrides?: CallOverrides): Promise<PopulatedTransaction>;
 
-    pullLiquidity(
+    "pullLiquidity(uint256,uint256[4])"(
       shares: BigNumberish,
       minAmounts: [BigNumberish, BigNumberish, BigNumberish, BigNumberish],
+      overrides?: Overrides & { from?: string | Promise<string> }
+    ): Promise<PopulatedTransaction>;
+
+    "pullLiquidity(int24,int24,uint128,uint256[2])"(
+      tickLower: BigNumberish,
+      tickUpper: BigNumberish,
+      shares: BigNumberish,
+      amountMin: [BigNumberish, BigNumberish],
       overrides?: Overrides & { from?: string | Promise<string> }
     ): Promise<PopulatedTransaction>;
 
@@ -959,6 +1069,10 @@ export class IHypervisor extends BaseContract {
     ): Promise<PopulatedTransaction>;
 
     tickSpacing(overrides?: CallOverrides): Promise<PopulatedTransaction>;
+
+    toggleDirectDeposit(
+      overrides?: Overrides & { from?: string | Promise<string> }
+    ): Promise<PopulatedTransaction>;
 
     token0(overrides?: CallOverrides): Promise<PopulatedTransaction>;
 

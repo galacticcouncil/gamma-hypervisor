@@ -46,10 +46,10 @@ contract Admin {
         int24 _limitLower,
         int24 _limitUpper,
         address _feeRecipient,
-        uint256[4] memory inMin, 
+        uint256[4] memory inMin,
         uint256[4] memory outMin
-    ) external onlyRebalancer(_hypervisor) {
-        IHypervisor(_hypervisor).rebalance(_baseLower, _baseUpper, _limitLower, _limitUpper, _feeRecipient, inMin, outMin);
+    ) external payable onlyRebalancer(_hypervisor) {
+        IHypervisor(_hypervisor).rebalance{value: msg.value}(_baseLower, _baseUpper, _limitLower, _limitUpper, _feeRecipient, inMin, outMin);
     }
 
     /// @notice Pull liquidity tokens from liquidity and receive the tokens
@@ -133,6 +133,10 @@ contract Admin {
     ) {
         IHypervisor(_hypervisor).compound(inMin);
     }
+    /// @param _hypervisor Hypervisor Address
+    function setWhitelist(address _hypervisor, address newWhitelist) external onlyAdmin {
+        IHypervisor(_hypervisor).setWhitelist(newWhitelist);
+    }
 
     /// @param _hypervisor Hypervisor Address
     function removeWhitelisted(address _hypervisor) external onlyAdmin {
@@ -181,5 +185,9 @@ contract Admin {
     /// @param newFee fee amount 
     function setFee(address _hypervisor, uint8 newFee) external onlyAdmin {
         IHypervisor(_hypervisor).setFee(newFee);
+    }
+    /// @notice Toggle Direct Deposit
+    function toggleDirectDeposit(address _hypervisor) external onlyAdmin {
+        IHypervisor(_hypervisor).toggleDirectDeposit();
     }
 }

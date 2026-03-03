@@ -23,15 +23,23 @@ interface AdminInterface extends ethers.utils.Interface {
   functions: {
     "addBaseLiquidity(address,uint256,uint256,uint256[2])": FunctionFragment;
     "addLimitLiquidity(address,uint256,uint256,uint256[2])": FunctionFragment;
+    "addLiquidity(address,int24,int24,uint256,uint256,uint256[2])": FunctionFragment;
     "admin()": FunctionFragment;
-    "advisor()": FunctionFragment;
-    "pullLiquidity(address,uint256,uint256[4])": FunctionFragment;
+    "advisors(address)": FunctionFragment;
+    "compound(address)": FunctionFragment;
+    "fixOwnership()": FunctionFragment;
+    "ownerFixed()": FunctionFragment;
+    "pullLiquidity(address,int24,int24,uint128,uint256[2])": FunctionFragment;
     "rebalance(address,int24,int24,int24,int24,address,uint256[4],uint256[4])": FunctionFragment;
+    "rebalancers(address)": FunctionFragment;
     "removeWhitelisted(address)": FunctionFragment;
     "rescueERC20(address,address)": FunctionFragment;
+    "setAdvisor(address,address)": FunctionFragment;
+    "setFee(address,uint8)": FunctionFragment;
+    "setRebalancer(address,address)": FunctionFragment;
     "setWhitelist(address,address)": FunctionFragment;
+    "toggleDirectDeposit(address)": FunctionFragment;
     "transferAdmin(address)": FunctionFragment;
-    "transferAdvisor(address)": FunctionFragment;
     "transferHypervisorOwner(address,address)": FunctionFragment;
   };
 
@@ -43,14 +51,36 @@ interface AdminInterface extends ethers.utils.Interface {
     functionFragment: "addLimitLiquidity",
     values: [string, BigNumberish, BigNumberish, [BigNumberish, BigNumberish]]
   ): string;
+  encodeFunctionData(
+    functionFragment: "addLiquidity",
+    values: [
+      string,
+      BigNumberish,
+      BigNumberish,
+      BigNumberish,
+      BigNumberish,
+      [BigNumberish, BigNumberish]
+    ]
+  ): string;
   encodeFunctionData(functionFragment: "admin", values?: undefined): string;
-  encodeFunctionData(functionFragment: "advisor", values?: undefined): string;
+  encodeFunctionData(functionFragment: "advisors", values: [string]): string;
+  encodeFunctionData(functionFragment: "compound", values: [string]): string;
+  encodeFunctionData(
+    functionFragment: "fixOwnership",
+    values?: undefined
+  ): string;
+  encodeFunctionData(
+    functionFragment: "ownerFixed",
+    values?: undefined
+  ): string;
   encodeFunctionData(
     functionFragment: "pullLiquidity",
     values: [
       string,
       BigNumberish,
-      [BigNumberish, BigNumberish, BigNumberish, BigNumberish]
+      BigNumberish,
+      BigNumberish,
+      [BigNumberish, BigNumberish]
     ]
   ): string;
   encodeFunctionData(
@@ -66,6 +96,7 @@ interface AdminInterface extends ethers.utils.Interface {
       [BigNumberish, BigNumberish, BigNumberish, BigNumberish]
     ]
   ): string;
+  encodeFunctionData(functionFragment: "rebalancers", values: [string]): string;
   encodeFunctionData(
     functionFragment: "removeWhitelisted",
     values: [string]
@@ -75,15 +106,27 @@ interface AdminInterface extends ethers.utils.Interface {
     values: [string, string]
   ): string;
   encodeFunctionData(
+    functionFragment: "setAdvisor",
+    values: [string, string]
+  ): string;
+  encodeFunctionData(
+    functionFragment: "setFee",
+    values: [string, BigNumberish]
+  ): string;
+  encodeFunctionData(
+    functionFragment: "setRebalancer",
+    values: [string, string]
+  ): string;
+  encodeFunctionData(
     functionFragment: "setWhitelist",
     values: [string, string]
   ): string;
   encodeFunctionData(
-    functionFragment: "transferAdmin",
+    functionFragment: "toggleDirectDeposit",
     values: [string]
   ): string;
   encodeFunctionData(
-    functionFragment: "transferAdvisor",
+    functionFragment: "transferAdmin",
     values: [string]
   ): string;
   encodeFunctionData(
@@ -99,13 +142,27 @@ interface AdminInterface extends ethers.utils.Interface {
     functionFragment: "addLimitLiquidity",
     data: BytesLike
   ): Result;
+  decodeFunctionResult(
+    functionFragment: "addLiquidity",
+    data: BytesLike
+  ): Result;
   decodeFunctionResult(functionFragment: "admin", data: BytesLike): Result;
-  decodeFunctionResult(functionFragment: "advisor", data: BytesLike): Result;
+  decodeFunctionResult(functionFragment: "advisors", data: BytesLike): Result;
+  decodeFunctionResult(functionFragment: "compound", data: BytesLike): Result;
+  decodeFunctionResult(
+    functionFragment: "fixOwnership",
+    data: BytesLike
+  ): Result;
+  decodeFunctionResult(functionFragment: "ownerFixed", data: BytesLike): Result;
   decodeFunctionResult(
     functionFragment: "pullLiquidity",
     data: BytesLike
   ): Result;
   decodeFunctionResult(functionFragment: "rebalance", data: BytesLike): Result;
+  decodeFunctionResult(
+    functionFragment: "rebalancers",
+    data: BytesLike
+  ): Result;
   decodeFunctionResult(
     functionFragment: "removeWhitelisted",
     data: BytesLike
@@ -114,16 +171,22 @@ interface AdminInterface extends ethers.utils.Interface {
     functionFragment: "rescueERC20",
     data: BytesLike
   ): Result;
+  decodeFunctionResult(functionFragment: "setAdvisor", data: BytesLike): Result;
+  decodeFunctionResult(functionFragment: "setFee", data: BytesLike): Result;
+  decodeFunctionResult(
+    functionFragment: "setRebalancer",
+    data: BytesLike
+  ): Result;
   decodeFunctionResult(
     functionFragment: "setWhitelist",
     data: BytesLike
   ): Result;
   decodeFunctionResult(
-    functionFragment: "transferAdmin",
+    functionFragment: "toggleDirectDeposit",
     data: BytesLike
   ): Result;
   decodeFunctionResult(
-    functionFragment: "transferAdvisor",
+    functionFragment: "transferAdmin",
     data: BytesLike
   ): Result;
   decodeFunctionResult(
@@ -194,11 +257,47 @@ export class Admin extends BaseContract {
       overrides?: Overrides & { from?: string | Promise<string> }
     ): Promise<ContractTransaction>;
 
+    addLiquidity(
+      _hypervisor: string,
+      tickLower: BigNumberish,
+      tickUpper: BigNumberish,
+      amount0: BigNumberish,
+      amount1: BigNumberish,
+      inMin: [BigNumberish, BigNumberish],
+      overrides?: Overrides & { from?: string | Promise<string> }
+    ): Promise<ContractTransaction>;
+
     admin(overrides?: CallOverrides): Promise<[string]>;
 
-    advisor(overrides?: CallOverrides): Promise<[string]>;
+    advisors(arg0: string, overrides?: CallOverrides): Promise<[string]>;
 
-    pullLiquidity(
+    "compound(address)"(
+      _hypervisor: string,
+      overrides?: Overrides & { from?: string | Promise<string> }
+    ): Promise<ContractTransaction>;
+
+    "compound(address,uint256[4])"(
+      _hypervisor: string,
+      inMin: [BigNumberish, BigNumberish, BigNumberish, BigNumberish],
+      overrides?: Overrides & { from?: string | Promise<string> }
+    ): Promise<ContractTransaction>;
+
+    fixOwnership(
+      overrides?: Overrides & { from?: string | Promise<string> }
+    ): Promise<ContractTransaction>;
+
+    ownerFixed(overrides?: CallOverrides): Promise<[boolean]>;
+
+    "pullLiquidity(address,int24,int24,uint128,uint256[2])"(
+      _hypervisor: string,
+      tickLower: BigNumberish,
+      tickUpper: BigNumberish,
+      shares: BigNumberish,
+      minAmounts: [BigNumberish, BigNumberish],
+      overrides?: Overrides & { from?: string | Promise<string> }
+    ): Promise<ContractTransaction>;
+
+    "pullLiquidity(address,uint256,uint256[4])"(
       _hypervisor: string,
       shares: BigNumberish,
       minAmounts: [BigNumberish, BigNumberish, BigNumberish, BigNumberish],
@@ -217,6 +316,8 @@ export class Admin extends BaseContract {
       overrides?: Overrides & { from?: string | Promise<string> }
     ): Promise<ContractTransaction>;
 
+    rebalancers(arg0: string, overrides?: CallOverrides): Promise<[string]>;
+
     removeWhitelisted(
       _hypervisor: string,
       overrides?: Overrides & { from?: string | Promise<string> }
@@ -228,19 +329,37 @@ export class Admin extends BaseContract {
       overrides?: Overrides & { from?: string | Promise<string> }
     ): Promise<ContractTransaction>;
 
+    setAdvisor(
+      _hypervisor: string,
+      newAdvisor: string,
+      overrides?: Overrides & { from?: string | Promise<string> }
+    ): Promise<ContractTransaction>;
+
+    setFee(
+      _hypervisor: string,
+      newFee: BigNumberish,
+      overrides?: Overrides & { from?: string | Promise<string> }
+    ): Promise<ContractTransaction>;
+
+    setRebalancer(
+      _hypervisor: string,
+      newRebalancer: string,
+      overrides?: Overrides & { from?: string | Promise<string> }
+    ): Promise<ContractTransaction>;
+
     setWhitelist(
       _hypervisor: string,
-      _address: string,
+      newWhitelist: string,
+      overrides?: Overrides & { from?: string | Promise<string> }
+    ): Promise<ContractTransaction>;
+
+    toggleDirectDeposit(
+      _hypervisor: string,
       overrides?: Overrides & { from?: string | Promise<string> }
     ): Promise<ContractTransaction>;
 
     transferAdmin(
       newAdmin: string,
-      overrides?: Overrides & { from?: string | Promise<string> }
-    ): Promise<ContractTransaction>;
-
-    transferAdvisor(
-      newAdvisor: string,
       overrides?: Overrides & { from?: string | Promise<string> }
     ): Promise<ContractTransaction>;
 
@@ -267,11 +386,47 @@ export class Admin extends BaseContract {
     overrides?: Overrides & { from?: string | Promise<string> }
   ): Promise<ContractTransaction>;
 
+  addLiquidity(
+    _hypervisor: string,
+    tickLower: BigNumberish,
+    tickUpper: BigNumberish,
+    amount0: BigNumberish,
+    amount1: BigNumberish,
+    inMin: [BigNumberish, BigNumberish],
+    overrides?: Overrides & { from?: string | Promise<string> }
+  ): Promise<ContractTransaction>;
+
   admin(overrides?: CallOverrides): Promise<string>;
 
-  advisor(overrides?: CallOverrides): Promise<string>;
+  advisors(arg0: string, overrides?: CallOverrides): Promise<string>;
 
-  pullLiquidity(
+  "compound(address)"(
+    _hypervisor: string,
+    overrides?: Overrides & { from?: string | Promise<string> }
+  ): Promise<ContractTransaction>;
+
+  "compound(address,uint256[4])"(
+    _hypervisor: string,
+    inMin: [BigNumberish, BigNumberish, BigNumberish, BigNumberish],
+    overrides?: Overrides & { from?: string | Promise<string> }
+  ): Promise<ContractTransaction>;
+
+  fixOwnership(
+    overrides?: Overrides & { from?: string | Promise<string> }
+  ): Promise<ContractTransaction>;
+
+  ownerFixed(overrides?: CallOverrides): Promise<boolean>;
+
+  "pullLiquidity(address,int24,int24,uint128,uint256[2])"(
+    _hypervisor: string,
+    tickLower: BigNumberish,
+    tickUpper: BigNumberish,
+    shares: BigNumberish,
+    minAmounts: [BigNumberish, BigNumberish],
+    overrides?: Overrides & { from?: string | Promise<string> }
+  ): Promise<ContractTransaction>;
+
+  "pullLiquidity(address,uint256,uint256[4])"(
     _hypervisor: string,
     shares: BigNumberish,
     minAmounts: [BigNumberish, BigNumberish, BigNumberish, BigNumberish],
@@ -290,6 +445,8 @@ export class Admin extends BaseContract {
     overrides?: Overrides & { from?: string | Promise<string> }
   ): Promise<ContractTransaction>;
 
+  rebalancers(arg0: string, overrides?: CallOverrides): Promise<string>;
+
   removeWhitelisted(
     _hypervisor: string,
     overrides?: Overrides & { from?: string | Promise<string> }
@@ -301,19 +458,37 @@ export class Admin extends BaseContract {
     overrides?: Overrides & { from?: string | Promise<string> }
   ): Promise<ContractTransaction>;
 
+  setAdvisor(
+    _hypervisor: string,
+    newAdvisor: string,
+    overrides?: Overrides & { from?: string | Promise<string> }
+  ): Promise<ContractTransaction>;
+
+  setFee(
+    _hypervisor: string,
+    newFee: BigNumberish,
+    overrides?: Overrides & { from?: string | Promise<string> }
+  ): Promise<ContractTransaction>;
+
+  setRebalancer(
+    _hypervisor: string,
+    newRebalancer: string,
+    overrides?: Overrides & { from?: string | Promise<string> }
+  ): Promise<ContractTransaction>;
+
   setWhitelist(
     _hypervisor: string,
-    _address: string,
+    newWhitelist: string,
+    overrides?: Overrides & { from?: string | Promise<string> }
+  ): Promise<ContractTransaction>;
+
+  toggleDirectDeposit(
+    _hypervisor: string,
     overrides?: Overrides & { from?: string | Promise<string> }
   ): Promise<ContractTransaction>;
 
   transferAdmin(
     newAdmin: string,
-    overrides?: Overrides & { from?: string | Promise<string> }
-  ): Promise<ContractTransaction>;
-
-  transferAdvisor(
-    newAdvisor: string,
     overrides?: Overrides & { from?: string | Promise<string> }
   ): Promise<ContractTransaction>;
 
@@ -340,11 +515,66 @@ export class Admin extends BaseContract {
       overrides?: CallOverrides
     ): Promise<void>;
 
+    addLiquidity(
+      _hypervisor: string,
+      tickLower: BigNumberish,
+      tickUpper: BigNumberish,
+      amount0: BigNumberish,
+      amount1: BigNumberish,
+      inMin: [BigNumberish, BigNumberish],
+      overrides?: CallOverrides
+    ): Promise<void>;
+
     admin(overrides?: CallOverrides): Promise<string>;
 
-    advisor(overrides?: CallOverrides): Promise<string>;
+    advisors(arg0: string, overrides?: CallOverrides): Promise<string>;
 
-    pullLiquidity(
+    "compound(address)"(
+      _hypervisor: string,
+      overrides?: CallOverrides
+    ): Promise<
+      [
+        BigNumber,
+        BigNumber,
+        BigNumber,
+        BigNumber,
+        [BigNumber, BigNumber, BigNumber, BigNumber]
+      ] & {
+        baseToken0Owed: BigNumber;
+        baseToken1Owed: BigNumber;
+        limitToken0Owed: BigNumber;
+        limitToken1Owed: BigNumber;
+        inMin: [BigNumber, BigNumber, BigNumber, BigNumber];
+      }
+    >;
+
+    "compound(address,uint256[4])"(
+      _hypervisor: string,
+      inMin: [BigNumberish, BigNumberish, BigNumberish, BigNumberish],
+      overrides?: CallOverrides
+    ): Promise<
+      [BigNumber, BigNumber, BigNumber, BigNumber] & {
+        baseToken0Owed: BigNumber;
+        baseToken1Owed: BigNumber;
+        limitToken0Owed: BigNumber;
+        limitToken1Owed: BigNumber;
+      }
+    >;
+
+    fixOwnership(overrides?: CallOverrides): Promise<void>;
+
+    ownerFixed(overrides?: CallOverrides): Promise<boolean>;
+
+    "pullLiquidity(address,int24,int24,uint128,uint256[2])"(
+      _hypervisor: string,
+      tickLower: BigNumberish,
+      tickUpper: BigNumberish,
+      shares: BigNumberish,
+      minAmounts: [BigNumberish, BigNumberish],
+      overrides?: CallOverrides
+    ): Promise<[BigNumber, BigNumber] & { base0: BigNumber; base1: BigNumber }>;
+
+    "pullLiquidity(address,uint256,uint256[4])"(
       _hypervisor: string,
       shares: BigNumberish,
       minAmounts: [BigNumberish, BigNumberish, BigNumberish, BigNumberish],
@@ -370,6 +600,8 @@ export class Admin extends BaseContract {
       overrides?: CallOverrides
     ): Promise<void>;
 
+    rebalancers(arg0: string, overrides?: CallOverrides): Promise<string>;
+
     removeWhitelisted(
       _hypervisor: string,
       overrides?: CallOverrides
@@ -381,18 +613,36 @@ export class Admin extends BaseContract {
       overrides?: CallOverrides
     ): Promise<void>;
 
+    setAdvisor(
+      _hypervisor: string,
+      newAdvisor: string,
+      overrides?: CallOverrides
+    ): Promise<void>;
+
+    setFee(
+      _hypervisor: string,
+      newFee: BigNumberish,
+      overrides?: CallOverrides
+    ): Promise<void>;
+
+    setRebalancer(
+      _hypervisor: string,
+      newRebalancer: string,
+      overrides?: CallOverrides
+    ): Promise<void>;
+
     setWhitelist(
       _hypervisor: string,
-      _address: string,
+      newWhitelist: string,
+      overrides?: CallOverrides
+    ): Promise<void>;
+
+    toggleDirectDeposit(
+      _hypervisor: string,
       overrides?: CallOverrides
     ): Promise<void>;
 
     transferAdmin(newAdmin: string, overrides?: CallOverrides): Promise<void>;
-
-    transferAdvisor(
-      newAdvisor: string,
-      overrides?: CallOverrides
-    ): Promise<void>;
 
     transferHypervisorOwner(
       _hypervisor: string,
@@ -420,11 +670,47 @@ export class Admin extends BaseContract {
       overrides?: Overrides & { from?: string | Promise<string> }
     ): Promise<BigNumber>;
 
+    addLiquidity(
+      _hypervisor: string,
+      tickLower: BigNumberish,
+      tickUpper: BigNumberish,
+      amount0: BigNumberish,
+      amount1: BigNumberish,
+      inMin: [BigNumberish, BigNumberish],
+      overrides?: Overrides & { from?: string | Promise<string> }
+    ): Promise<BigNumber>;
+
     admin(overrides?: CallOverrides): Promise<BigNumber>;
 
-    advisor(overrides?: CallOverrides): Promise<BigNumber>;
+    advisors(arg0: string, overrides?: CallOverrides): Promise<BigNumber>;
 
-    pullLiquidity(
+    "compound(address)"(
+      _hypervisor: string,
+      overrides?: Overrides & { from?: string | Promise<string> }
+    ): Promise<BigNumber>;
+
+    "compound(address,uint256[4])"(
+      _hypervisor: string,
+      inMin: [BigNumberish, BigNumberish, BigNumberish, BigNumberish],
+      overrides?: Overrides & { from?: string | Promise<string> }
+    ): Promise<BigNumber>;
+
+    fixOwnership(
+      overrides?: Overrides & { from?: string | Promise<string> }
+    ): Promise<BigNumber>;
+
+    ownerFixed(overrides?: CallOverrides): Promise<BigNumber>;
+
+    "pullLiquidity(address,int24,int24,uint128,uint256[2])"(
+      _hypervisor: string,
+      tickLower: BigNumberish,
+      tickUpper: BigNumberish,
+      shares: BigNumberish,
+      minAmounts: [BigNumberish, BigNumberish],
+      overrides?: Overrides & { from?: string | Promise<string> }
+    ): Promise<BigNumber>;
+
+    "pullLiquidity(address,uint256,uint256[4])"(
       _hypervisor: string,
       shares: BigNumberish,
       minAmounts: [BigNumberish, BigNumberish, BigNumberish, BigNumberish],
@@ -443,6 +729,8 @@ export class Admin extends BaseContract {
       overrides?: Overrides & { from?: string | Promise<string> }
     ): Promise<BigNumber>;
 
+    rebalancers(arg0: string, overrides?: CallOverrides): Promise<BigNumber>;
+
     removeWhitelisted(
       _hypervisor: string,
       overrides?: Overrides & { from?: string | Promise<string> }
@@ -454,19 +742,37 @@ export class Admin extends BaseContract {
       overrides?: Overrides & { from?: string | Promise<string> }
     ): Promise<BigNumber>;
 
+    setAdvisor(
+      _hypervisor: string,
+      newAdvisor: string,
+      overrides?: Overrides & { from?: string | Promise<string> }
+    ): Promise<BigNumber>;
+
+    setFee(
+      _hypervisor: string,
+      newFee: BigNumberish,
+      overrides?: Overrides & { from?: string | Promise<string> }
+    ): Promise<BigNumber>;
+
+    setRebalancer(
+      _hypervisor: string,
+      newRebalancer: string,
+      overrides?: Overrides & { from?: string | Promise<string> }
+    ): Promise<BigNumber>;
+
     setWhitelist(
       _hypervisor: string,
-      _address: string,
+      newWhitelist: string,
+      overrides?: Overrides & { from?: string | Promise<string> }
+    ): Promise<BigNumber>;
+
+    toggleDirectDeposit(
+      _hypervisor: string,
       overrides?: Overrides & { from?: string | Promise<string> }
     ): Promise<BigNumber>;
 
     transferAdmin(
       newAdmin: string,
-      overrides?: Overrides & { from?: string | Promise<string> }
-    ): Promise<BigNumber>;
-
-    transferAdvisor(
-      newAdvisor: string,
       overrides?: Overrides & { from?: string | Promise<string> }
     ): Promise<BigNumber>;
 
@@ -494,11 +800,50 @@ export class Admin extends BaseContract {
       overrides?: Overrides & { from?: string | Promise<string> }
     ): Promise<PopulatedTransaction>;
 
+    addLiquidity(
+      _hypervisor: string,
+      tickLower: BigNumberish,
+      tickUpper: BigNumberish,
+      amount0: BigNumberish,
+      amount1: BigNumberish,
+      inMin: [BigNumberish, BigNumberish],
+      overrides?: Overrides & { from?: string | Promise<string> }
+    ): Promise<PopulatedTransaction>;
+
     admin(overrides?: CallOverrides): Promise<PopulatedTransaction>;
 
-    advisor(overrides?: CallOverrides): Promise<PopulatedTransaction>;
+    advisors(
+      arg0: string,
+      overrides?: CallOverrides
+    ): Promise<PopulatedTransaction>;
 
-    pullLiquidity(
+    "compound(address)"(
+      _hypervisor: string,
+      overrides?: Overrides & { from?: string | Promise<string> }
+    ): Promise<PopulatedTransaction>;
+
+    "compound(address,uint256[4])"(
+      _hypervisor: string,
+      inMin: [BigNumberish, BigNumberish, BigNumberish, BigNumberish],
+      overrides?: Overrides & { from?: string | Promise<string> }
+    ): Promise<PopulatedTransaction>;
+
+    fixOwnership(
+      overrides?: Overrides & { from?: string | Promise<string> }
+    ): Promise<PopulatedTransaction>;
+
+    ownerFixed(overrides?: CallOverrides): Promise<PopulatedTransaction>;
+
+    "pullLiquidity(address,int24,int24,uint128,uint256[2])"(
+      _hypervisor: string,
+      tickLower: BigNumberish,
+      tickUpper: BigNumberish,
+      shares: BigNumberish,
+      minAmounts: [BigNumberish, BigNumberish],
+      overrides?: Overrides & { from?: string | Promise<string> }
+    ): Promise<PopulatedTransaction>;
+
+    "pullLiquidity(address,uint256,uint256[4])"(
       _hypervisor: string,
       shares: BigNumberish,
       minAmounts: [BigNumberish, BigNumberish, BigNumberish, BigNumberish],
@@ -517,6 +862,11 @@ export class Admin extends BaseContract {
       overrides?: Overrides & { from?: string | Promise<string> }
     ): Promise<PopulatedTransaction>;
 
+    rebalancers(
+      arg0: string,
+      overrides?: CallOverrides
+    ): Promise<PopulatedTransaction>;
+
     removeWhitelisted(
       _hypervisor: string,
       overrides?: Overrides & { from?: string | Promise<string> }
@@ -528,19 +878,37 @@ export class Admin extends BaseContract {
       overrides?: Overrides & { from?: string | Promise<string> }
     ): Promise<PopulatedTransaction>;
 
+    setAdvisor(
+      _hypervisor: string,
+      newAdvisor: string,
+      overrides?: Overrides & { from?: string | Promise<string> }
+    ): Promise<PopulatedTransaction>;
+
+    setFee(
+      _hypervisor: string,
+      newFee: BigNumberish,
+      overrides?: Overrides & { from?: string | Promise<string> }
+    ): Promise<PopulatedTransaction>;
+
+    setRebalancer(
+      _hypervisor: string,
+      newRebalancer: string,
+      overrides?: Overrides & { from?: string | Promise<string> }
+    ): Promise<PopulatedTransaction>;
+
     setWhitelist(
       _hypervisor: string,
-      _address: string,
+      newWhitelist: string,
+      overrides?: Overrides & { from?: string | Promise<string> }
+    ): Promise<PopulatedTransaction>;
+
+    toggleDirectDeposit(
+      _hypervisor: string,
       overrides?: Overrides & { from?: string | Promise<string> }
     ): Promise<PopulatedTransaction>;
 
     transferAdmin(
       newAdmin: string,
-      overrides?: Overrides & { from?: string | Promise<string> }
-    ): Promise<PopulatedTransaction>;
-
-    transferAdvisor(
-      newAdvisor: string,
       overrides?: Overrides & { from?: string | Promise<string> }
     ): Promise<PopulatedTransaction>;
 
