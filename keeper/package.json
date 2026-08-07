@@ -1,0 +1,27 @@
+{
+  "name": "gamma-keeper",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Off-chain keeper for the Gamma ALM Hypervisor on Hydration. Triggers on spot, places on TWAP, gated by dwell/cooldown/oracle clamp; submits directly (Model A) or through RebalanceProxy's on-chain caps (Model B).",
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "dev": "tsx watch src/index.ts",
+    "dry": "DRY_RUN=true tsx src/index.ts",
+    "smoke": "tsx src/smoke.ts",
+    "once": "tsx src/once.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.5",
+    "ethers": "^5.7.2",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.9.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.4"
+  }
+}

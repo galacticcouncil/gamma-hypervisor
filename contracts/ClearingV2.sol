@@ -83,8 +83,11 @@ contract ClearingV2 is ReentrancyGuard {
     require(p.version == 0, 'already added');
     require(version > 0, 'version < 1');
     p.version = version;
-    IHypervisor(pos).token0().safeApprove(pos, MAX_UINT);
-    IHypervisor(pos).token1().safeApprove(pos, MAX_UINT);
+    // HydraDX asset precompiles store balances as u128, so an approval of
+    // MAX_UINT (2**256-1) overflows and reverts. uint128 max is the precompile's
+    // "infinite allowance" sentinel (it isn't decremented on transferFrom).
+    IHypervisor(pos).token0().safeApprove(pos, type(uint128).max);
+    IHypervisor(pos).token1().safeApprove(pos, type(uint128).max);
     emit PositionAdded(pos, version);
   }
 

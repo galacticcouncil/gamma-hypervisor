@@ -1,0 +1,24 @@
+{
+  "network": {
+    "name": "lark1",
+    "evmRpc": "https://1.lark.hydration.cloud",
+    "chainId": 222222
+  },
+  "deployer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+  "uniswap": {
+    "v3Factory": "0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0",
+    "swapRouter02": "0x9A676e781A523b5d0C0e43731313A708CB607508",
+    "quoterV2": "0x0DCd1Bf9A1b36cE34237eEaFef220932846BCD82",
+    "npm": "0x610178dA211FEF7D417bC0e6FeD39F05609AD788"
+  },
+  "gamma": {
+    "hypervisorFactory": "0x09635F643e140090A9A8Dcd712eD6285858ceBef",
+    "hypervisor": "0xE6A5d620D14D4Cf665B96F37AaC55FAf70108Ff9",
+    "clearing": "0x67d269191c92Caf3cD7723F116c85e6E9bf55933",
+    "uniProxy": "0xE6E340D132b5f46d1e472DebcD681B2aBc16e57E",
+    "pool": "0x8f86fDedd41169b6CAD841535E02487d91409CF1",
+    "fee": 3000,
+    "token0": "0x0000000000000000000000000000000100000009",
+    "token1": "0x0000000000000000000000000000000100000010"
+  }
+}

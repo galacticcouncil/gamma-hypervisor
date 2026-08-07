@@ -129,7 +129,11 @@ interface IHypervisor {
   function setWhitelist(address _address) external;
   
   function setFee(uint8 newFee) external;
-  
+
+  // Present in Hypervisor.sol (toggleDirectDeposit, line ~615) but missing from
+  // this interface, which broke proxy/admin.sol compilation.
+  function toggleDirectDeposit() external;
+
   function removeWhitelisted() external;
 
   function transferOwnership(address newOwner) external;
