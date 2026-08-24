@@ -4,6 +4,8 @@ import { tickFromPrice } from './price';
 export interface OracleReading {
   tick: number;
   ageSecs: number;
+  /** The human price behind the tick — token1 per token0. Used by the regime checks. */
+  price: number;
 }
 
 export interface OracleInput {
@@ -51,5 +53,9 @@ export async function readOracleTick(o: OracleInput): Promise<OracleReading> {
 
   // Human price (token1 per token0) -> raw pool price -> tick.
   const priceRaw = priceHuman * Math.pow(10, o.decimals1 - o.decimals0);
-  return { tick: tickFromPrice(priceRaw), ageSecs: Math.max(0, o.nowTs - oldestTs) };
+  return {
+    tick: tickFromPrice(priceRaw),
+    ageSecs: Math.max(0, o.nowTs - oldestTs),
+    price: priceHuman,
+  };
 }

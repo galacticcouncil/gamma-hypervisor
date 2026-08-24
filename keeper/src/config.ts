@@ -64,6 +64,49 @@ const Env = z
     ORACLE_MAX_AGE_SECS: z.coerce.number().int().positive().default(600),
     ORACLE_MAX_DEV_TICKS: z.coerce.number().int().positive().default(200),
 
+    // --- volatility regime (garden spec note-gamma-adot-hollar-alm-spec D3) ---
+    // v3 cannot raise its fee, so the vault quotes wider or stops quoting.
+    REGIME_ENABLED: boolEnv(false),
+    // Widened band half-width (multiples of tickSpacing) while elevated.
+    // Spec asks for ~±20%: ln(1.20)/ln(1.0001)/60 = 30 at spacing 60.
+    ELEVATED_HALF_WIDTH_MULT: z.coerce.number().int().positive().default(30),
+    // 1h vol at or above this multiple of its 30-day median is "elevated".
+    VOL_RATIO_ELEVATED: z.coerce.number().positive().default(3),
+    // Fractional moves, not percent: 0.02 = 2%.
+    MOVE_15M_ELEVATED: z.coerce.number().positive().default(0.02),
+    MOVE_1H_EXTREME: z.coerce.number().positive().default(0.08),
+    // Continuous calm required before leaving `extreme`.
+    REGIME_REENTRY_SECS: z.coerce.number().int().positive().default(7200),
+
+    // --- vol baseline (neckwork indexer) ---
+    // Supplies ONLY the 30-day median, which cannot come from the chain. If it is
+    // unset or unreachable the keeper drops that one trigger and keeps running on
+    // the feed-move triggers — it is never a reason to stop.
+    INDEXER_URL: z.string().url().optional(),
+    // The indexer tracks DOT, not aDOT. It does not need to: aDOT is 1:1 with DOT.
+    INDEXER_BASE_ASSET: z.coerce.number().int().nonnegative().default(5),
+    INDEXER_QUOTE_ASSET: z.coerce.number().int().nonnegative().default(10),
+    INDEXER_TIMEOUT_MS: z.coerce.number().int().positive().default(5000),
+    VOL_BASELINE_DAYS: z.coerce.number().int().positive().default(30),
+    VOL_BASELINE_REFRESH_SECS: z.coerce.number().int().positive().default(3600),
+
+    // --- money-market reserve pause check ---
+    // A PAUSED reserve makes aToken transfers revert and the pool seizes, so every
+    // rebalance would fail on-chain. Aave protocol data provider + the UNDERLYING
+    // asset address (DOT), not the aToken.
+    MM_DATA_PROVIDER: addr.optional(),
+    MM_UNDERLYING: addr.optional(),
+
+    // --- compound cadence (spec D4) ---
+    // Harvest fees and re-mint the SAME ticks. Separate from the rebalance floor:
+    // compounding does not move the band, and its cadence sets how often the
+    // protocol fee actually reaches the recipient.
+    COMPOUND_ENABLED: boolEnv(false),
+    COMPOUND_INTERVAL_SECS: z.coerce.number().int().positive().default(86400),
+    // Admin address. Compound goes through Admin.compound (onlyAdvisor), which is
+    // a different role from the rebalancer the proxy holds.
+    ADMIN_ADDRESS: addr.optional(),
+
     GAS_FLOOR_WEI: z.string().regex(/^\d+$/).default('0'),
     GAS_LIMIT: z.coerce.number().int().positive().default(3_000_000),
     CONFIRMATIONS: z.coerce.number().int().nonnegative().default(3),
@@ -91,6 +134,29 @@ const Env = z
         code: z.ZodIssueCode.custom,
         path: ['FEE_RECIPIENT'],
         message: 'required for live runs — the protocol-fee cut must go to the Treasury, not default to the keeper key',
+      });
+    }
+    if (e.COMPOUND_ENABLED && !e.ADMIN_ADDRESS) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['ADMIN_ADDRESS'],
+        message: 'COMPOUND_ENABLED needs ADMIN_ADDRESS — compound is Admin.compound, not a vault call',
+      });
+    }
+    if (e.REGIME_ENABLED && !e.MM_DATA_PROVIDER) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['MM_DATA_PROVIDER'],
+        message:
+          'REGIME_ENABLED needs MM_DATA_PROVIDER + MM_UNDERLYING: an unreadable reserve-pause ' +
+          'state is treated as paused, so without it the keeper would sit in `extreme` forever',
+      });
+    }
+    if (e.REGIME_ENABLED && !e.MM_UNDERLYING) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['MM_UNDERLYING'],
+        message: 'MM_UNDERLYING (the underlying reserve asset, e.g. DOT) is required when REGIME_ENABLED=true',
       });
     }
     if (!e.DRY_RUN && !e.TWAP_ENABLED && !e.ALLOW_UNSAFE_SPOT) {

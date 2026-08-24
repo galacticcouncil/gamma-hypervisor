@@ -223,3 +223,63 @@ reasoning inline. The differences that matter:
 observation cardinality (a ring of C slots covers `(C-1) × 6s`, so 3600s needs
 C ≥ 601; the launch scripts set 720). Three repos, no shared constant — reconcile
 them before launch.
+
+## Volatility regime
+
+Uniswap v3 has one fee, fixed at pool creation. When the market turns, the vault
+cannot charge more for the risk it is taking — so it takes less risk instead.
+
+| regime | trigger | what the keeper does |
+| --- | --- | --- |
+| calm | — | normal band, rebalance as usual |
+| elevated | 1h vol ≥ 3× its 30d median, **or** price ±2% in 15m | widen the band to `ELEVATED_HALF_WIDTH_MULT`, keep rebalancing |
+| extreme | price ±8% in 1h, **or** feed stale/diverging, **or** money-market reserve paused | refuse to rebalance, log an operator alert |
+
+Entering `extreme` is immediate. Leaving it is not: conditions must stay calm for
+`REGIME_REENTRY_SECS` first, so a market oscillating across the threshold cannot
+make the vault add and pull liquidity repeatedly.
+
+### The keeper cannot pull liquidity
+
+`Admin.pullLiquidity` is `onlyRebalancer`, and the **RebalanceProxy** holds that
+role — but the proxy's only action is `rebalance`. So in `extreme` the keeper
+refuses to act and prints what a human has to do:
+
+```
+1. Admin.setRebalancer(vault, <signer>)     borrow the role
+2. Admin.pullLiquidity(vault, ...)          funds go idle in the vault
+3. Admin.setRebalancer(vault, <proxy>)      restore (can wait — while the
+                                            multisig holds it, the keeper
+                                            cannot rebalance, which during
+                                            an incident is what you want)
+```
+
+Shareholders keep their shares throughout; the pool just loses the vault's depth.
+
+### Where each input comes from
+
+| input | source | if it fails |
+| --- | --- | --- |
+| 1h vol vs 30d median | neckwork indexer | **trigger dropped, keeper continues** |
+| price move 15m / 1h | the price feed the keeper already reads | trigger dropped until the trail fills |
+| feed health | existing oracle gate | counts as extreme |
+| reserve paused | Aave data provider | **unreadable counts as paused** |
+
+Only the vol baseline needs the indexer, and it is explicitly non-fatal — a
+30-day median cannot come from the chain, but everything else can, so an indexer
+outage costs one trigger rather than the keeper.
+
+The price trail is in memory and not persisted. After a restart the 15m and 1h
+moves are unavailable until it refills. That is deliberate: a stale trail
+reloaded after an outage would compare a fresh price against an old one and read
+a normal market as a crash.
+
+## Compounding
+
+Harvest fees, re-mint the same ticks. It does not move the band, so it is not
+bound by the proxy's `minInterval` — and its cadence sets how often the fee
+recipient is actually paid.
+
+Runs through `Admin.compound`, which is **onlyAdvisor** — a different role from
+the rebalancer. The deploy scripts set the keeper as advisor via
+`KEEPER_ADDRESS`; without it this reverts with "only advisor".
