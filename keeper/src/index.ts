@@ -18,7 +18,7 @@ async function main(): Promise<void> {
   log(`  feeRecipient ${ctx.feeRecipient}`);
   log(`  strategy     base ±${cfg.BASE_HALF_WIDTH_MULT}×spacing, trigger >${cfg.REBALANCE_THRESHOLD_MULT}×spacing, limit ${cfg.LIMIT_WIDTH_MULT}×spacing`);
   log(`  gates        twap ${cfg.TWAP_ENABLED ? `on (${cfg.TWAP_WINDOW_SECS}s, maxDev ${cfg.MAX_DEV_TICKS})` : 'OFF'}, dwell ${cfg.DWELL_BLOCKS} blocks, minInterval ${cfg.MIN_INTERVAL_SECS}s`);
-  log(`  oracle       ${cfg.ORACLE_ENABLED ? `${cfg.ORACLE_KEY0}${cfg.ORACLE_KEY1 ? ` / ${cfg.ORACLE_KEY1}` : ''} @ ${cfg.ORACLE_ADDRESS} (maxDev ${cfg.ORACLE_MAX_DEV_TICKS}, maxAge ${cfg.ORACLE_MAX_AGE_SECS}s)` : 'off'}`);
+  log(`  oracle       ${cfg.ORACLE_ENABLED ? `${cfg.ORACLE_FEED0}${cfg.ORACLE_FEED1 ? ` / ${cfg.ORACLE_FEED1}` : ' (token1 = USD side)'} (maxDev ${cfg.ORACLE_MAX_DEV_TICKS}, maxAge ${cfg.ORACLE_MAX_AGE_SECS}s)` : 'off'}`);
   log(`  mins         ${cfg.MINS_TOLERANCE_BPS} bps tolerance`);
   log(`  mode         ${cfg.DRY_RUN ? 'DRY_RUN (no tx)' : 'LIVE'}`);
 

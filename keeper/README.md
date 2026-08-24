@@ -18,7 +18,7 @@ Four independent layers, each of which alone would blunt the attack:
 | **Placement off TWAP** | Spot may *trigger* a rebalance; the band is centered on the pool **TWAP** tick. Pushing spot cannot drag the band to the pushed price. | `TWAP_ENABLED` |
 | **Deviation gate** | If spot and TWAP disagree by more than `MAX_DEV_TICKS`, do nothing at all. | `MAX_DEV_TICKS` |
 | **Dwell + cooldown** | The trigger must hold for `DWELL_BLOCKS` consecutive blocks, and rebalances are `MIN_INTERVAL_SECS` apart. Flash loans do not survive a block boundary; holding a fake price for real time costs real money and bleeds to arbitrage. | `DWELL_BLOCKS`, `MIN_INTERVAL_SECS` |
-| **External oracle clamp** | The pool TWAP itself is walkable given enough capital and patience. A DIA feed is not. Rebalance only if the pool agrees with the outside world. | `ORACLE_*` |
+| **External oracle clamp** | The pool TWAP itself is walkable given enough capital and patience. An exchange-fed price oracle is not. Rebalance only if the pool agrees with the outside world. | `ORACLE_*` |
 
 Plus **non-zero slippage bounds** (`MINS_TOLERANCE_BPS`): if the price moves between
 the decision and the tx landing, the rebalance reverts rather than executing at the
@@ -70,7 +70,7 @@ fire, push the pool price with a large swap, then wait `DWELL_BLOCKS` blocks.
 3. **dwell** — the trigger must hold `DWELL_BLOCKS` blocks in a row;
 4. **cooldown** — `MIN_INTERVAL_SECS`, and the proxy's on-chain `minInterval`;
 5. **TWAP gate** — window clamped to the pool's actual history; skip if `|spot − TWAP| > MAX_DEV_TICKS`. The TWAP tick becomes the **placement** tick;
-6. **oracle clamp** — skip if the pool disagrees with DIA by more than `ORACLE_MAX_DEV_TICKS`, or the feed is older than `ORACLE_MAX_AGE_SECS`;
+6. **oracle clamp** — skip if the pool disagrees with the price feed by more than `ORACLE_MAX_DEV_TICKS`, or the feed is older than `ORACLE_MAX_AGE_SECS`;
 7. **gas floor** — skip if the signer's WETH balance is below `GAS_FLOOR_WEI`;
 8. compute the base band around the **placement** tick (`±BASE_HALF_WIDTH_MULT × tickSpacing`), clamped to the proxy's `maxTranslation`; place the limit range one-sided on the surplus token;
 9. derive `inMin`/`outMin` from the current positions and price, less `MINS_TOLERANCE_BPS`;
@@ -102,9 +102,7 @@ fire, push the pool price with a large swap, then wait `DWELL_BLOCKS` blocks.
 | `MINS_TOLERANCE_BPS` | `1000` | slippage bound per leg |
 | **oracle clamp** | | |
 | `ORACLE_ENABLED` | `false` | require agreement with an external feed |
-| `ORACLE_ADDRESS` | — | DIA-style `getValue(string)` oracle |
-| `ORACLE_KEY0` / `ORACLE_KEY1` | — | feed keys, e.g. `DOT/USD`; omit `KEY1` if token1 is the USD side |
-| `ORACLE_PRICE_DECIMALS` | `8` | feed decimals (DIA: 8) |
+| `ORACLE_FEED0` / `ORACLE_FEED1` | — | Chainlink AggregatorV3 **addresses**, one per pair; omit `FEED1` if token1 is the USD side |
 | `ORACLE_MAX_AGE_SECS` | `600` | reject staler feeds |
 | `ORACLE_MAX_DEV_TICKS` | `200` | max pool-vs-oracle deviation (~2%) |
 | **operations** | | |
@@ -178,3 +176,50 @@ withdraw, rebalance). The `10%` in the contract's natspec is stale.
 - **Excluded assets:** rebasing / fee-on-transfer tokens and aTokens. The mins and
   ratio math assume balances don't move on their own, and rebase yield strands in
   the pool.
+
+## Price feeds are AggregatorV3, not DIA
+
+Hydration's price feeds answer Chainlink's `latestRoundData()`. They **revert** on
+DIA's `getValue(string)` — verified against every feed the money market uses on
+2026-08-21:
+
+| feed | `latestRoundData()` | `getValue()` | `description()` |
+| --- | --- | --- | --- |
+| DOT | 0.877151 | revert | `DOT/USD Oracle` |
+| SOL | 90.206235 | revert | `SOL/USD Oracle` |
+| EURC | 1.170186 | revert | `EUR/USD Oracle` |
+| USDT | 0.999707 | revert | `USDT/USD Oracle` |
+
+DIA supplies the **data**; the chain serves it through the **AggregatorV3
+interface**, the same feeds Aave reads. The practical consequence is that a feed
+is selected by **address**, not by a key string — there is one contract per pair —
+so `ORACLE_FEED0` / `ORACLE_FEED1` are addresses and the old `ORACLE_KEY*` and
+`ORACLE_PRICE_DECIMALS` settings are gone (decimals come from `decimals()`).
+
+Mainnet DOT/USD: `0xFBCa0A6dC5B74C042DF23025D99ef0F1fcAC6702` (8 decimals,
+updates roughly every 2 minutes). aDOT is 1:1 with DOT — the balance rebases, the
+price does not — so this feed *is* the aDOT price, with no index factor.
+
+## Launch profile
+
+`.env.example` is laptop-scale: oracle clamp off, ±6% band, 18-second dwell,
+10-minute cooldown. **Do not run it against real money.**
+
+`.env.mainnet.example` carries the aDOT/HOLLAR launch values, each with the
+reasoning inline. The differences that matter:
+
+| setting | dev default | launch |
+| --- | --- | --- |
+| `ORACLE_ENABLED` | `false` | **`true`** |
+| `BASE_HALF_WIDTH_MULT` | `10` (±6.2%) | **`16`** (+10.08% / −9.15%) |
+| `MIN_INTERVAL_SECS` | `600` | **`21600`** (6h) |
+| `DWELL_BLOCKS` | `3` (~18s) | **`300`** (~30 min) |
+| `MIN_TWAP_WINDOW_SECS` | `600` | **`3000`** |
+| `MAX_DEV_TICKS` | `100` (1.0%) | **`50`** (0.5%) |
+| `ORACLE_MAX_DEV_TICKS` | `200` (2.0%) | **`50`** (0.5%) |
+| `ENTRYPOINT` | `direct` | **`proxy`** |
+
+`TWAP_WINDOW_SECS` must match ClearingV2's `twapInterval` **and** the pool's
+observation cardinality (a ring of C slots covers `(C-1) × 6s`, so 3600s needs
+C ≥ 601; the launch scripts set 720). Three repos, no shared constant — reconcile
+them before launch.

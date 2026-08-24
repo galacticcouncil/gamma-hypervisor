@@ -12,6 +12,27 @@ const MAX_TRANSLATION = Number(process.env.MAX_TRANSLATION || 300); // ticks per
 const MAX_WIDTH = Number(process.env.MAX_WIDTH || 300);
 const MIN_INTERVAL = Number(process.env.MIN_INTERVAL || 600); // seconds
 
+// Guarded-launch caps. Hypervisor.sol fixes maxTotalSupply/deposit maxima at
+// construction (0 = no cap, uint256(-1) = unlimited) with no setters, so they are
+// applied on ClearingV2 — the layer every deposit passes through. 0 = no cap.
+const MAX_TOTAL_SUPPLY = process.env.MAX_TOTAL_SUPPLY || "0";
+const DEPOSIT0_MAX = process.env.DEPOSIT0_MAX || "0";
+const DEPOSIT1_MAX = process.env.DEPOSIT1_MAX || "0";
+// Gamma fee DIVISOR: 5 = 20% (contract default), 255 = ~0.4%. Never 0 — that
+// bricks harvesting. 0 here means "leave at the contract default".
+const HYPERVISOR_FEE = Number(process.env.HYPERVISOR_FEE || 0);
+
+// Admin is the role that can move vault ownership, reassign the rebalancer and
+// advisor, set the fee and rescue tokens — a hot key here is the whole vault. On
+// Hydration that goes to GOVERNANCE, not a Safe: an OpenGov referendum is the
+// multi-party approval, and governance can act as the EVM address whose first 20
+// bytes match a dispatch account it controls (0xaa7e…aa7e0 via
+// dispatcher.dispatchAsAaveManager). Blank = keep the deployer (testnets only).
+const GOVERNANCE_ADDRESS = process.env.GOVERNANCE_ADDRESS || "";
+// Becomes Admin's advisor so `compound` is reachable. Compound re-mints the SAME
+// ticks, so it cannot move the band — safe for a hot key.
+const KEEPER_ADDRESS = process.env.KEEPER_ADDRESS || "";
+
 const POOL_ORACLE_ABI = [
   "function slot0() view returns (uint160 sqrtPriceX96,int24 tick,uint16 observationIndex,uint16 observationCardinality,uint16 observationCardinalityNext,uint8 feeProtocol,bool unlocked)",
   "function increaseObservationCardinalityNext(uint16)",
@@ -59,6 +80,33 @@ async function main() {
   await send(clearing.setTwapInterval(CLEARING_TWAP_INTERVAL, { gasLimit: GAS.call }), `clearing.setTwapInterval(${CLEARING_TWAP_INTERVAL})`);
   await send(clearing.setPriceThreshold(PRICE_THRESHOLD, { gasLimit: GAS.call }), `clearing.setPriceThreshold(${PRICE_THRESHOLD})`);
 
+  // Deposit caps. `customDeposit` stores the per-tx maxima but `clearDeposit`
+  // only enforces them when `depositOverride` is set — without that second call
+  // they are inert and the unlimited Hypervisor values are used instead.
+  if (MAX_TOTAL_SUPPLY !== "0" || DEPOSIT0_MAX !== "0" || DEPOSIT1_MAX !== "0") {
+    await send(
+      clearing.customDeposit(hypervisor, DEPOSIT0_MAX, DEPOSIT1_MAX, MAX_TOTAL_SUPPLY, 0, { gasLimit: GAS.call }),
+      `clearing.customDeposit(maxSupply=${MAX_TOTAL_SUPPLY} d0=${DEPOSIT0_MAX} d1=${DEPOSIT1_MAX})`
+    );
+    if (DEPOSIT0_MAX !== "0" || DEPOSIT1_MAX !== "0") {
+      await send(
+        clearing.setDepositOverride(hypervisor, true, { gasLimit: GAS.call }),
+        "clearing.setDepositOverride(true)"
+      );
+    }
+  } else {
+    console.log("clearing caps: NONE — unlimited deposits (set MAX_TOTAL_SUPPLY / DEPOSIT0_MAX / DEPOSIT1_MAX)");
+  }
+
+  // Gamma fee divisor, while the deployer still owns the vault.
+  if (HYPERVISOR_FEE) {
+    if (HYPERVISOR_FEE < 1 || HYPERVISOR_FEE > 255) throw new Error("HYPERVISOR_FEE must be 1..255");
+    const hyper = await ethers.getContractAt(["function setFee(uint8) external"], hypervisor);
+    await send(hyper.setFee(HYPERVISOR_FEE, { gasLimit: GAS.call }), `hypervisor.setFee(${HYPERVISOR_FEE})`);
+  } else {
+    console.log("hypervisor fee: contract default (5 = 20% of swap fees)");
+  }
+
   // Grow the pool's observation ring. A cardinality-1 pool makes observe()
   // revert, which disables BOTH the keeper's TWAP gate and ClearingV2's deposit
   // check. The ring still has to fill before a full window is readable.
@@ -99,6 +147,25 @@ async function main() {
   await send(rebalanceProxy.setCustomDiffWidth(hypervisor, MAX_WIDTH, { gasLimit: GAS.call }), `proxy maxWidth=${MAX_WIDTH}`);
   await send(rebalanceProxy.setCustomInterval(hypervisor, MIN_INTERVAL, { gasLimit: GAS.call }), `proxy minInterval=${MIN_INTERVAL}s`);
 
+  // LAST. setAdvisor is onlyAdmin, so it must run before the hand-off; the
+  // hand-off must be last because it retires the deployer's admin rights.
+  if (KEEPER_ADDRESS) {
+    await send(
+      admin.setAdvisor(hypervisor, KEEPER_ADDRESS, { gasLimit: GAS.call }),
+      `admin.setAdvisor(${KEEPER_ADDRESS}) — compound reachable`
+    );
+  } else {
+    console.log("admin advisor: UNSET — compound unreachable (set KEEPER_ADDRESS)");
+  }
+  if (GOVERNANCE_ADDRESS) {
+    await send(
+      admin.transferAdmin(GOVERNANCE_ADDRESS, { gasLimit: GAS.call }),
+      `admin.transferAdmin(${GOVERNANCE_ADDRESS}) — hot admin key retired`
+    );
+  } else {
+    console.log(`admin.admin: left as deployer ${deployer.address} — set GOVERNANCE_ADDRESS for anything real`);
+  }
+
   saveDeployment({
     network: { name: "lark1", evmRpc: LARK.rpc, chainId: LARK.chainId },
     deployer: deployer.address,
@@ -109,6 +176,8 @@ async function main() {
       clearing: clearing.address,
       uniProxy: uniProxy.address,
       admin: admin.address,
+      adminOwner: GOVERNANCE_ADDRESS || deployer.address,
+      advisor: KEEPER_ADDRESS || null,
       rebalanceProxy: rebalanceProxy.address,
       keeper,
       pool: LARK.pool,

@@ -128,10 +128,8 @@ export async function evaluate(ctx: Ctx, blockNumber: number, state: KeeperState
   if (ctx.oracle) {
     try {
       const o = await readOracleTick({
-        oracle: ctx.oracle,
-        key0: cfg.ORACLE_KEY0!,
-        key1: cfg.ORACLE_KEY1,
-        priceDecimals: cfg.ORACLE_PRICE_DECIMALS,
+        feed0: ctx.oracle.feed0,
+        feed1: ctx.oracle.feed1,
         decimals0: ctx.decimals0,
         decimals1: ctx.decimals1,
         nowTs: now,

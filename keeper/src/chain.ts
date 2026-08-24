@@ -1,5 +1,5 @@
 import { ethers } from 'ethers';
-import { DIA_ORACLE_ABI, ERC20_ABI, HYPERVISOR_ABI, POOL_ABI, REBALANCE_PROXY_ABI } from './abis';
+import { AGGREGATOR_V3_ABI, ERC20_ABI, HYPERVISOR_ABI, POOL_ABI, REBALANCE_PROXY_ABI } from './abis';
 import type { Config } from './config';
 import { log } from './log';
 
@@ -10,7 +10,7 @@ export interface Ctx {
   vault: ethers.Contract;
   pool: ethers.Contract;
   proxy?: ethers.Contract; // ENTRYPOINT=proxy (Model B)
-  oracle?: ethers.Contract; // ORACLE_ENABLED
+  oracle?: { feed0: ethers.Contract; feed1?: ethers.Contract }; // ORACLE_ENABLED
   tickSpacing: number;
   decimals0: number;
   decimals1: number;
@@ -61,8 +61,16 @@ export async function createContext(cfg: Config): Promise<Ctx> {
     cfg.ENTRYPOINT === 'proxy'
       ? new ethers.Contract(cfg.REBALANCE_PROXY!, REBALANCE_PROXY_ABI, signer)
       : undefined;
+  // One AggregatorV3 contract per pair, so the clamp needs one feed per token.
+  // feed1 is optional: omit it when token1 is the USD-pegged side (HOLLAR), and
+  // token0/USD is the pool price directly.
   const oracle = cfg.ORACLE_ENABLED
-    ? new ethers.Contract(cfg.ORACLE_ADDRESS!, DIA_ORACLE_ABI, provider)
+    ? {
+        feed0: new ethers.Contract(cfg.ORACLE_FEED0!, AGGREGATOR_V3_ABI, provider),
+        feed1: cfg.ORACLE_FEED1
+          ? new ethers.Contract(cfg.ORACLE_FEED1, AGGREGATOR_V3_ABI, provider)
+          : undefined,
+      }
     : undefined;
 
   return {

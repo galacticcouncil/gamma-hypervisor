@@ -45,7 +45,13 @@ export const REBALANCE_PROXY_ABI = [
   'function exempted(address) view returns (bool)',
 ];
 
-// DIA-style key/value oracle (e.g. the DIA DOT/USD feed on Hydration).
-export const DIA_ORACLE_ABI = [
-  'function getValue(string key) view returns (uint128 value, uint128 timestamp)',
+// Hydration price feeds are Chainlink AggregatorV3, NOT DIA getValue(string).
+// DIA supplies the data; the chain serves it through this interface — the same
+// feeds the Aave market reads. Every mainnet feed reverts on getValue() and
+// answers latestRoundData() (verified 2026-08-21), and there is ONE CONTRACT PER
+// PAIR, so a feed is selected by address rather than by a key string.
+export const AGGREGATOR_V3_ABI = [
+  'function latestRoundData() view returns (uint80 roundId, int256 answer, uint256 startedAt, uint256 updatedAt, uint80 answeredInRound)',
+  'function decimals() view returns (uint8)',
+  'function description() view returns (string)',
 ];

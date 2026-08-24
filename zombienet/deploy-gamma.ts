@@ -55,6 +55,50 @@ const MAX_TRANSLATION = Number(process.env.MAX_TRANSLATION || 300);
 const MAX_WIDTH = Number(process.env.MAX_WIDTH || 300);
 const MIN_INTERVAL = Number(process.env.MIN_INTERVAL || 600);
 
+// --- Guarded-launch caps (garden spec note-gamma-adot-hollar-alm-spec §B) ---
+//
+// Hypervisor.sol fixes these AT CONSTRUCTION and ships them wide open:
+//   maxTotalSupply = 0 (no cap) · deposit0Max/1Max = uint256(-1) (unlimited)
+// and exposes no setters, so they cannot be tightened on the vault itself.
+//
+// ClearingV2 re-enforces all three per position, and THAT is the layer deposits
+// actually pass through (UniProxy -> ClearingV2 -> Hypervisor.deposit). So the
+// caps go here.
+//
+// 0 on any of these means "no cap", matching the Hypervisor's own convention.
+const MAX_TOTAL_SUPPLY = process.env.MAX_TOTAL_SUPPLY || "0";
+const DEPOSIT0_MAX = process.env.DEPOSIT0_MAX || "0";
+const DEPOSIT1_MAX = process.env.DEPOSIT1_MAX || "0";
+
+// Gamma's cut of harvested swap fees, as a DIVISOR: 5 = 20%, 255 = ~0.4%.
+// Unlike the deposit caps this one IS settable on the vault (`setFee`, onlyOwner)
+// — but only while the deployer still owns it, i.e. before the Admin handoff.
+// It cannot be 0: `owed.div(0)` reverts and zeroBurn sits on the deposit,
+// withdraw AND rebalance paths, so a 0 here bricks the vault.
+// Code default is 5 (20%); the spec's launch leaning is 255. Left at the code
+// default here so a testnet run matches upstream; set it explicitly for mainnet.
+const HYPERVISOR_FEE = Number(process.env.HYPERVISOR_FEE || 0);
+
+// Who ends up holding Admin — the role that can move vault ownership, reassign
+// the rebalancer and advisor, set the fee, and rescue tokens. A hot key here is
+// the whole vault.
+//
+// On Hydration this is governance, not a Safe: an OpenGov referendum IS the
+// multi-party approval. Governance acts as the EVM address whose first 20 bytes
+// match a dispatch account it controls, so the address below is not arbitrary —
+// it is reachable via dispatcher.dispatchAsAaveManager (Root or the
+// EconomicParameters track).
+//
+// Blank = keep the deployer, which is correct for a throwaway chain and wrong
+// for anything else.
+const GOVERNANCE_ADDRESS = process.env.GOVERNANCE_ADDRESS || "";
+
+// The keeper key, which becomes Admin's advisor so `compound` is reachable.
+// Compound harvests fees and re-mints THE SAME ticks — it cannot move the band,
+// change the price or withdraw — so a hot key holding it is low risk. Blank =
+// no advisor, and compound stays unreachable (the contract default).
+const KEEPER_ADDRESS = process.env.KEEPER_ADDRESS || "";
+
 const UNISWAP_DEPLOYMENTS =
   process.env.UNISWAP_DEPLOYMENTS ||
   path.join(__dirname, "../../uniswap-v3-deploy/zombienet/deployments/zombienet.json");
@@ -70,6 +114,92 @@ const FACTORY_ABI = [
   "function getPool(address,address,uint24) view returns (address)",
   "function createPool(address,address,uint24) returns (address)",
 ];
+
+/**
+ * Make `compound` reachable, then hand Admin to governance.
+ *
+ * Order matters. `setAdvisor` is onlyAdmin, so it has to happen while the
+ * deployer still holds Admin — afterwards it needs a referendum. And the
+ * hand-off must be last, because it is the step that retires the hot key.
+ */
+async function handOverAdmin(admin: any, hypervisor: string): Promise<void> {
+  if (KEEPER_ADDRESS) {
+    await (await admin.setAdvisor(hypervisor, KEEPER_ADDRESS)).wait();
+    console.log(`Admin.setAdvisor(${KEEPER_ADDRESS}) — compound reachable by the keeper`);
+  } else {
+    console.log("Admin advisor: UNSET — compound is unreachable (set KEEPER_ADDRESS)");
+  }
+
+  if (!GOVERNANCE_ADDRESS) {
+    console.log(
+      `Admin.admin: left as the deployer ${await admin.admin()} — ` +
+        "set GOVERNANCE_ADDRESS before anything holding real funds"
+    );
+    return;
+  }
+  await (await admin.transferAdmin(GOVERNANCE_ADDRESS)).wait();
+  console.log(`Admin.transferAdmin(${GOVERNANCE_ADDRESS}) — hot admin key retired`);
+}
+
+/**
+ * Apply the guarded-launch deposit caps to a ClearingV2 position.
+ *
+ * Two calls, and the second one is the trap: `customDeposit` stores the per-tx
+ * maxima but `clearDeposit` only checks them `if (p.depositOverride)`. Setting
+ * the caps without flipping that flag leaves them inert — the deposit path reads
+ * the Hypervisor's own unlimited values instead. `maxTotalSupply` is not gated
+ * that way; it applies as soon as it is non-zero.
+ */
+async function applyDepositCaps(clearing: any, pos: string): Promise<void> {
+  const anyCap =
+    MAX_TOTAL_SUPPLY !== "0" || DEPOSIT0_MAX !== "0" || DEPOSIT1_MAX !== "0";
+  if (!anyCap) {
+    console.log(
+      "ClearingV2 caps: NONE — vault accepts unlimited deposits. Set " +
+        "MAX_TOTAL_SUPPLY / DEPOSIT0_MAX / DEPOSIT1_MAX for a guarded launch."
+    );
+    return;
+  }
+
+  // customDepositDelta 0 = keep the global depositDelta.
+  await (
+    await clearing.customDeposit(pos, DEPOSIT0_MAX, DEPOSIT1_MAX, MAX_TOTAL_SUPPLY, 0)
+  ).wait();
+
+  const perTx = DEPOSIT0_MAX !== "0" || DEPOSIT1_MAX !== "0";
+  if (perTx) {
+    await (await clearing.setDepositOverride(pos, true)).wait();
+  }
+  console.log(
+    `ClearingV2 caps: maxTotalSupply=${MAX_TOTAL_SUPPLY} ` +
+      `deposit0Max=${DEPOSIT0_MAX} deposit1Max=${DEPOSIT1_MAX} ` +
+      `depositOverride=${perTx}`
+  );
+}
+
+/**
+ * Set the Gamma fee divisor, while the deployer still owns the vault.
+ *
+ * `setFee` is `onlyOwner`, and step 7 hands the vault to Admin — after that this
+ * has to go through Admin, so it belongs here.
+ */
+async function applyHypervisorFee(pos: string): Promise<void> {
+  if (!HYPERVISOR_FEE) {
+    console.log("Hypervisor fee: left at the contract default (5 = 20% of swap fees)");
+    return;
+  }
+  if (HYPERVISOR_FEE < 1 || HYPERVISOR_FEE > 255) {
+    throw new Error(`HYPERVISOR_FEE must be 1..255 (divisor); 0 bricks harvesting`);
+  }
+  const hypervisor = await ethers.getContractAt(
+    ["function setFee(uint8 newFee) external"],
+    pos
+  );
+  await (await hypervisor.setFee(HYPERVISOR_FEE)).wait();
+  console.log(
+    `Hypervisor fee: ${HYPERVISOR_FEE} (= ${(100 / HYPERVISOR_FEE).toFixed(2)}% of swap fees to feeRecipient)`
+  );
+}
 
 async function main() {
   if (!fs.existsSync(UNISWAP_DEPLOYMENTS)) {
@@ -139,9 +269,15 @@ async function main() {
   await (await clearing.setPriceThreshold(PRICE_THRESHOLD)).wait();
   console.log(`ClearingV2 twapInterval=${TWAP_INTERVAL}s priceThreshold=${PRICE_THRESHOLD} (${(PRICE_THRESHOLD - 10_000) / 100}% deviation)`);
 
+  await applyDepositCaps(clearing, hypervisorAddr);
+  await applyHypervisorFee(hypervisorAddr);
+
   // 7) Model B access layer: Admin owns the vault, RebalanceProxy bounds the
   //    keeper key. Admin.rebalance is onlyRebalancer, so the proxy must be
   //    Admin's rebalancer, and the keeper must be the proxy's.
+  // Admin starts owned by the deployer so the wiring below is plain transactions.
+  // Handing it to governance first would make every setup call a referendum;
+  // `handOverAdmin` at the end does the transfer once everything is in place.
   const Admin = await ethers.getContractFactory("Admin");
   const admin = await Admin.deploy(signer.address);
   await admin.deployed();
@@ -174,6 +310,10 @@ async function main() {
   console.log(`Hypervisor.setWhitelist(${signer.address})  [BOOTSTRAP — configure-guards.ts switches this to UniProxy]`);
   console.log(`Hypervisor.owner still ${signer.address} — configure-guards.ts hands over to Admin`);
 
+  // 10) LAST: set the advisor, then retire the hot admin key. Everything above
+  //     is onlyAdmin, so this has to come after all of it.
+  await handOverAdmin(admin, hypervisorAddr);
+
   const out = {
     ...uni,
     gamma: {
@@ -182,6 +322,8 @@ async function main() {
       clearing: clearing.address,
       uniProxy: uniProxy.address,
       admin: admin.address,
+      adminOwner: GOVERNANCE_ADDRESS || signer.address,
+      advisor: KEEPER_ADDRESS || null,
       rebalanceProxy: rebalanceProxy.address,
       keeper,
       pool: poolAddr,

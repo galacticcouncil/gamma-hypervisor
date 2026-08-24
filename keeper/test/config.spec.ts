@@ -90,11 +90,17 @@ describe('config refuses unsafe combinations', () => {
     expect(() => loadConfig()).toThrow(/ORACLE/);
   });
 
-  it('accepts an enabled oracle with an address and key', () => {
+  it('accepts an enabled oracle with a feed address', () => {
     live();
     process.env.ORACLE_ENABLED = 'true';
-    process.env.ORACLE_ADDRESS = ADDR;
-    process.env.ORACLE_KEY0 = 'DOT/USD';
-    expect(loadConfig().ORACLE_KEY0).toBe('DOT/USD');
+    process.env.ORACLE_FEED0 = ADDR;
+    expect(loadConfig().ORACLE_FEED0).toBe(ADDR);
+  });
+
+  it('does not require a second feed — token1 may be the USD side', () => {
+    live();
+    process.env.ORACLE_ENABLED = 'true';
+    process.env.ORACLE_FEED0 = ADDR;
+    expect(loadConfig().ORACLE_FEED1).toBeUndefined();
   });
 });

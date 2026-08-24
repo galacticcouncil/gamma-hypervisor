@@ -47,16 +47,20 @@ const Env = z
     ALLOW_UNSAFE_SPOT: boolEnv(false),
 
     // Slippage bounds on the rebalance burn/mint legs, in bps of the expected
-    // amount. NOTE: leg amounts move ~15-20× faster than price for a ±6% band,
-    // so 1000 bps ≈ 0.3-0.6% of price drift headroom.
+    // amount. COUPLED TO BASE_HALF_WIDTH_MULT: a position's composition swings
+    // from all-token0 to all-token1 across the band, so the legs move roughly
+    // 1/halfWidth faster than price. 1000 bps ≈ 0.3-0.6% of price drift headroom
+    // at ±6% (mult 10); at the ±10% launch band (mult 16) the same 1000 bps buys
+    // ≈ 0.5-1.0%. Re-derive whenever the band width changes.
     MINS_TOLERANCE_BPS: z.coerce.number().int().min(1).max(9999).default(1000),
 
-    // --- external oracle clamp (DIA-style getValue feeds) ---
+    // --- external oracle clamp (Chainlink AggregatorV3 feeds) ---
+    // NOT DIA getValue(string): DIA supplies the data, but Hydration serves it
+    // through AggregatorV3 and every mainnet feed reverts on getValue(). One
+    // contract per pair, so feeds are ADDRESSES, not key strings.
     ORACLE_ENABLED: boolEnv(false),
-    ORACLE_ADDRESS: addr.optional(),
-    ORACLE_KEY0: z.string().optional(), // token0 feed, e.g. "DOT/USD"
-    ORACLE_KEY1: z.string().optional(), // token1 feed; omit if token1 is the USD side
-    ORACLE_PRICE_DECIMALS: z.coerce.number().int().nonnegative().default(8),
+    ORACLE_FEED0: addr.optional(), // token0/USD, e.g. mainnet DOT/USD
+    ORACLE_FEED1: addr.optional(), // token1/USD; omit if token1 is the USD side
     ORACLE_MAX_AGE_SECS: z.coerce.number().int().positive().default(600),
     ORACLE_MAX_DEV_TICKS: z.coerce.number().int().positive().default(200),
 
@@ -75,11 +79,11 @@ const Env = z
     if (e.ENTRYPOINT === 'proxy' && !e.REBALANCE_PROXY) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['REBALANCE_PROXY'], message: 'required when ENTRYPOINT=proxy' });
     }
-    if (e.ORACLE_ENABLED && (!e.ORACLE_ADDRESS || !e.ORACLE_KEY0)) {
+    if (e.ORACLE_ENABLED && !e.ORACLE_FEED0) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        path: ['ORACLE_ADDRESS'],
-        message: 'ORACLE_ADDRESS and ORACLE_KEY0 are required when ORACLE_ENABLED=true',
+        path: ['ORACLE_FEED0'],
+        message: 'ORACLE_FEED0 (an AggregatorV3 address) is required when ORACLE_ENABLED=true',
       });
     }
     if (!e.DRY_RUN && !e.FEE_RECIPIENT) {

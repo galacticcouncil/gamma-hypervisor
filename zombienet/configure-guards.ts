@@ -67,6 +67,7 @@ const PROXY_ABI = [
 const ADMIN_ABI = [
   "function admin() view returns (address)",
   "function rebalancers(address) view returns (address)",
+  "function advisors(address) view returns (address)",
 ];
 
 // MUST match the keeper's BASE_HALF_WIDTH_MULT. The initial band set here is the
@@ -193,7 +194,20 @@ async function main() {
   console.log(`[5] proxy.admin=${proxyAdmin}`);
   console.log(`    proxy.rebalancer=${proxyRebalancer}  (keeper key)`);
   console.log(`    admin.rebalancer=${adminRebalancer}  (must be the proxy)`);
-  console.log(`    admin.admin=${adminOwner}  (governance)`);
+  console.log(`    admin.admin=${adminOwner}  (should be governance, not a hot key)`);
+  const advisor = await admin.advisors(g.hypervisor);
+  console.log(
+    `    admin.advisor=${advisor}` +
+      (advisor === ethers.constants.AddressZero
+        ? "  ⚠ UNSET — compound is unreachable; set KEEPER_ADDRESS at deploy"
+        : "  (keeper — compound)")
+  );
+  if (adminOwner.toLowerCase() === signer.address.toLowerCase()) {
+    console.log(
+      "    ⚠ Admin is held by THIS KEY. It can move vault ownership, reassign the\n" +
+        "      rebalancer/advisor, set the fee and rescue tokens. Set GOVERNANCE_ADDRESS."
+    );
+  }
 
   const wiringOk =
     proxyAdmin.toLowerCase() === g.admin.toLowerCase() &&
