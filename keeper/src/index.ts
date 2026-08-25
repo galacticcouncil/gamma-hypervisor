@@ -20,6 +20,7 @@ async function main(): Promise<void> {
   log(`  gates        twap ${cfg.TWAP_ENABLED ? `on (${cfg.TWAP_WINDOW_SECS}s, maxDev ${cfg.MAX_DEV_TICKS})` : 'OFF'}, dwell ${cfg.DWELL_BLOCKS} blocks, minInterval ${cfg.MIN_INTERVAL_SECS}s`);
   log(`  oracle       ${cfg.ORACLE_ENABLED ? `${cfg.ORACLE_FEED0}${cfg.ORACLE_FEED1 ? ` / ${cfg.ORACLE_FEED1}` : ' (token1 = USD side)'} (maxDev ${cfg.ORACLE_MAX_DEV_TICKS}, maxAge ${cfg.ORACLE_MAX_AGE_SECS}s)` : 'off'}`);
   log(`  mins         ${cfg.MINS_TOLERANCE_BPS} bps tolerance`);
+  log(`  compound     ${cfg.COMPOUND_ENABLED ? `every ${cfg.COMPOUND_INTERVAL_SECS}s via Admin ${cfg.ADMIN_ADDRESS}, bounded` : 'off'}`);
   log(`  mode         ${cfg.DRY_RUN ? 'DRY_RUN (no tx)' : 'LIVE'}`);
 
   await validateRoles(ctx);
@@ -29,6 +30,13 @@ async function main(): Promise<void> {
   }
   if (!cfg.ORACLE_ENABLED) {
     log('  ⚠ external oracle clamp OFF — the pool is its own only price reference.');
+  }
+  if (cfg.COMPOUND_ENABLED && cfg.COMPOUND_INTERVAL_SECS > 3600) {
+    log(
+      `  ⚠ COMPOUND_INTERVAL_SECS=${cfg.COMPOUND_INTERVAL_SECS} is long. Each sweep tips the whole\n` +
+        '    idle balance into the pool at once, and what a sandwich can extract scales with\n' +
+        '    that pile. Prefer minutes.',
+    );
   }
 
   await startKeeper(ctx);

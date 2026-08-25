@@ -14,12 +14,29 @@ import { log } from './log';
  * (KEEPER_ADDRESS); without that this call reverts with "only advisor" and
  * compounding is simply unavailable.
  */
-export const ADMIN_COMPOUND_ABI = ['function compound(address _hypervisor) external'];
+/**
+ * SLIPPAGE. `compound()` re-mints the vault's entire idle balance at whatever
+ * price the pool quotes when the tx lands — one block after the keeper looked.
+ * That gap is front-runnable: shove the price, let our mint land against the
+ * distorted composition, shove it back. `inMin` is the only protection that
+ * binds at EXECUTION time, so we always call the bounded overload and never
+ * fall back to the unbounded one. If the deployed Admin predates that overload
+ * the preflight reverts and we skip, which is the correct failure direction.
+ */
+export const ADMIN_COMPOUND_ABI = [
+  'function compound(address _hypervisor) external',
+  'function compound(address _hypervisor, uint256[4] inMin) external',
+];
+
+/** Explicit signature: ethers needs it to pick between the two overloads. */
+const BOUNDED = 'compound(address,uint256[4])';
 
 export interface CompoundInput {
   signer: ethers.Wallet;
   admin: string;
   vault: string;
+  /** Floors on what the base and limit mints must consume. Never all-zero. */
+  inMin: ethers.BigNumber[];
   gasLimit: number;
   confirmations: number;
 }
@@ -31,9 +48,9 @@ export async function compoundOnce(i: CompoundInput): Promise<boolean> {
 
     // Preflight as a call first: a revert here is informational (usually "only
     // advisor" or nothing to harvest) and must not cost gas or kill the loop.
-    await admin.callStatic.compound(i.vault);
+    await admin.callStatic[BOUNDED](i.vault, i.inMin);
 
-    const tx = await admin.compound(i.vault, { gasLimit: i.gasLimit });
+    const tx = await admin[BOUNDED](i.vault, i.inMin, { gasLimit: i.gasLimit });
     log(`  compound submitted ${tx.hash}`);
     await tx.wait(i.confirmations);
     log('  ✓ compounded');

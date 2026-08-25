@@ -167,7 +167,7 @@ async function main() {
   }
 
   saveDeployment({
-    network: { name: "lark1", evmRpc: LARK.rpc, chainId: LARK.chainId },
+    network: { name: process.env.DEPLOY_NAME || "lark1", evmRpc: LARK.rpc, chainId: LARK.chainId },
     deployer: deployer.address,
     uniswap: { v3Factory: LARK.v3Factory, swapRouter02: LARK.swapRouter02, quoterV2: LARK.quoterV2, npm: LARK.npm },
     gamma: {

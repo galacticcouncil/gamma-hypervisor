@@ -1,3 +1,7 @@
 node_modules
-.env
+# Every .env variant — run configs carry PRIVATE_KEY. `.env` alone missed
+# .env.lark4 / .env.prev-backup. The *.example files stay tracked.
+.env*
+!.env.example
+!.env.mainnet.example
 *.log

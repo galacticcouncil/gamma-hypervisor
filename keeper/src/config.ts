@@ -59,8 +59,12 @@ const Env = z
     // through AggregatorV3 and every mainnet feed reverts on getValue(). One
     // contract per pair, so feeds are ADDRESSES, not key strings.
     ORACLE_ENABLED: boolEnv(false),
-    ORACLE_FEED0: addr.optional(), // token0/USD, e.g. mainnet DOT/USD
-    ORACLE_FEED1: addr.optional(), // token1/USD; omit if token1 is the USD side
+    ORACLE_FEED0: addr.optional(), // the volatile side's USD feed, e.g. DOT/USD
+    ORACLE_FEED1: addr.optional(), // the other side's USD feed; omit if it is USD-pegged
+    // Which pool side ORACLE_FEED0 prices. The pool tick is token1-per-token0, so
+    // a feed on token1 must be inverted. Wrong value = oracle tick thousands of
+    // ticks off = every rebalance silently skipped. aDOT/HOLLAR sorts aDOT first.
+    ORACLE_FEED0_SIDE: z.enum(['token0', 'token1']).default('token0'),
     ORACLE_MAX_AGE_SECS: z.coerce.number().int().positive().default(600),
     ORACLE_MAX_DEV_TICKS: z.coerce.number().int().positive().default(200),
 
@@ -102,7 +106,10 @@ const Env = z
     // compounding does not move the band, and its cadence sets how often the
     // protocol fee actually reaches the recipient.
     COMPOUND_ENABLED: boolEnv(false),
-    COMPOUND_INTERVAL_SECS: z.coerce.number().int().positive().default(86400),
+    // Small and frequent, deliberately. What an attacker can extract by sandwiching
+    // a sweep scales with the pile it tips in, so a short interval keeps every
+    // individual sweep under the threshold where attacking it beats the swap fee.
+    COMPOUND_INTERVAL_SECS: z.coerce.number().int().positive().default(300),
     // Admin address. Compound goes through Admin.compound (onlyAdvisor), which is
     // a different role from the rebalancer the proxy holds.
     ADMIN_ADDRESS: addr.optional(),

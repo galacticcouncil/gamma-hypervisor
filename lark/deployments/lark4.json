@@ -1,0 +1,38 @@
+{
+  "network": {
+    "name": "lark4",
+    "evmRpc": "https://node4.lark.hydration.cloud",
+    "chainId": 222222
+  },
+  "deployer": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+  "uniswap": {
+    "v3Factory": "0x5FbDB2315678afecb367f032d93F642f64180aa3",
+    "swapRouter02": "0xA51c1fc2f0D1a1b8494Ed1FE312d7C3a78Ed91C0",
+    "quoterV2": "0xB7f8BC63BbcaD18155201308C8f3540b07f84F5e",
+    "npm": "0x2279B7A0a67DB372996a5FaB50D91eAA73d2eBe6"
+  },
+  "gamma": {
+    "hypervisorFactory": "0x8f86403A4DE0BB5791fa46B8e795C547942fE4Cf",
+    "hypervisor": "0x7Ee5e4aCE3bdcEf233a5831d0494252AD6c7Cb21",
+    "clearing": "0x5eb3Bc0a489C5A8288765d2336659EbCA68FCd00",
+    "uniProxy": "0x36C02dA8a0983159322a80FFE9F24b1acfF8B570",
+    "admin": "0x5f3f1dBD7B74C6B46e8c44f98792A1dAf8d69154",
+    "adminOwner": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+    "advisor": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+    "rebalanceProxy": "0xb7278A61aa25c888815aFC32Ad3cC52fF24fE575",
+    "keeper": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+    "pool": "0xc3139a43E80c1b5C0f31CFF9A60531B7cA3898ef",
+    "fee": 3000,
+    "token0": "0x02639ec01313c8775Fae74F2dad1118c8A8a86dA",
+    "token1": "0x531a654d1696ED52e7275A8cede955E82620f99a",
+    "config": {
+      "observationCardinality": 2000,
+      "priceThreshold": 10100,
+      "twapInterval": 3600,
+      "maxTranslation": 300,
+      "maxWidth": 300,
+      "minInterval": 600,
+      "posture": "bootstrap"
+    }
+  }
+}

@@ -60,6 +60,7 @@ async function main(): Promise<void> {
       const o = await readOracleTick({
         feed0: ctx.oracle.feed0,
         feed1: ctx.oracle.feed1,
+        feed0Side: cfg.ORACLE_FEED0_SIDE,
         decimals0: ctx.decimals0,
         decimals1: ctx.decimals1,
         nowTs,

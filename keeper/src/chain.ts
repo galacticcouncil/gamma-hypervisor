@@ -9,6 +9,8 @@ export interface Ctx {
   signer: ethers.Wallet;
   vault: ethers.Contract;
   pool: ethers.Contract;
+  token0: ethers.Contract;
+  token1: ethers.Contract;
   proxy?: ethers.Contract; // ENTRYPOINT=proxy (Model B)
   oracle?: { feed0: ethers.Contract; feed1?: ethers.Contract }; // ORACLE_ENABLED
   tickSpacing: number;
@@ -79,6 +81,8 @@ export async function createContext(cfg: Config): Promise<Ctx> {
     signer,
     vault,
     pool,
+    token0: t0,
+    token1: t1,
     proxy,
     oracle,
     tickSpacing,

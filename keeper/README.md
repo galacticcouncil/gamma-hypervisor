@@ -283,3 +283,29 @@ recipient is actually paid.
 Runs through `Admin.compound`, which is **onlyAdvisor** — a different role from
 the rebalancer. The deploy scripts set the keeper as advisor via
 `KEEPER_ADDRESS`; without it this reverts with "only advisor".
+
+### Why the sweep is gated and bounded
+
+`Hypervisor.compound()` re-mints `token{0,1}.balanceOf(vault)` into the existing
+ranges at raw spot. That is a jump in pool depth between two blocks, which is
+precisely what an atomic sandwich needs — buy while the pool is thin, let our
+sweep deepen it, sell into the deeper book. It is the Arrakis V1 mechanism with
+the vault's own money, performed voluntarily on a public schedule.
+
+Three things address it, and they bind at different times:
+
+| | Binds at | Covers |
+|---|---|---|
+| `COMPOUND_INTERVAL_SECS` (300s) | always | keeps each pile below the profit threshold |
+| the shared price gates | decision time | refuses to sweep into a pool that already disagrees with its TWAP, the DIA feed, or a calm regime |
+| `inMin` via `computeCompoundMins` | **execution time** | a front-run between our read and our tx landing shifts the mint's composition; the floors make `_mintLiquidity` revert `PSC` |
+
+Only the third protects against front-running our own transaction, because the
+gates are evaluated a block before the tx lands. We therefore always call the
+`compound(address,uint256[4])` overload and never fall back to the unbounded
+one — if the deployed `Admin` predates it, the preflight reverts and the sweep
+is skipped, which is the correct failure direction.
+
+The floors are tight: with `MINS_TOLERANCE_BPS=1000` on a ±600-tick band, a 1%
+price push already drops consumption under them. Amounts move far faster than
+price, which is the same conversion documented in `mins.ts`.

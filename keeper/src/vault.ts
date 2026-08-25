@@ -42,3 +42,17 @@ export async function readPositions(
 export function surplusSide(split: BaseSplit, priceRaw: number): LimitSide {
   return split.residual0 * priceRaw > split.residual1 ? 'above' : 'below';
 }
+
+/**
+ * The vault's own token balances. This is exactly what `compound()` re-mints —
+ * `getTotalAmounts()` is the wrong number, because it also counts the tokens
+ * already sitting inside the Uniswap positions.
+ */
+export async function readIdleBalances(
+  token0: ethers.Contract,
+  token1: ethers.Contract,
+  vault: string,
+): Promise<[ethers.BigNumber, ethers.BigNumber]> {
+  const [b0, b1] = await Promise.all([token0.balanceOf(vault), token1.balanceOf(vault)]);
+  return [b0, b1];
+}

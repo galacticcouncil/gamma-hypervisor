@@ -104,3 +104,53 @@ export function computeMins(i: MinsInput): Mins {
   ];
   return { inMin, outMin };
 }
+
+export interface CompoundMinsInput {
+  /** The vault's own token balances — what `compound()` actually re-mints. */
+  idle0: ethers.BigNumber;
+  idle1: ethers.BigNumber;
+  sqrtPriceX96: ethers.BigNumber;
+  /** Current base range; compound re-mints into the SAME ticks, it never moves them. */
+  base: [number, number];
+  /** Current limit range; takes whatever the base leaves over. */
+  limit: [number, number];
+  toleranceBps: number;
+}
+
+/**
+ * Slippage floors for `compound()`.
+ *
+ * `Hypervisor.compound` re-mints `token{0,1}.balanceOf(vault)` into the existing
+ * base range and then the existing limit range, at whatever price the pool
+ * quotes when the tx lands. Between our read and that landing, anyone watching
+ * the tx pool can push the price — which shifts the composition the mint
+ * consumes. `_mintLiquidity` reverts 'PSC' when consumption falls under these
+ * floors, so this is the ONLY execution-time protection on the sweep; the
+ * keeper's TWAP and oracle gates only bind at decision time, a block earlier.
+ *
+ * Two applications of the same split the rebalance path uses: the base takes
+ * what the price ratio allows, the limit range absorbs the residual (one-sided
+ * in practice, but `splitForBand` clamps correctly either way).
+ *
+ * `zeroBurn()` runs first inside `compound` and adds freshly collected fees to
+ * the balance, so actual consumption is slightly ABOVE what we predict here.
+ * That slack is in the safe direction — it can only make a floor easier to
+ * clear, never cause a false revert — and it shrinks as COMPOUND_INTERVAL_SECS
+ * shrinks.
+ */
+export function computeCompoundMins(i: CompoundMinsInput): ethers.BigNumber[] {
+  const k = 1 - i.toleranceBps / 10_000;
+  const base = splitForBand(i.idle0, i.idle1, i.sqrtPriceX96, i.base);
+  const limit = splitForBand(
+    bnFloor(base.residual0),
+    bnFloor(base.residual1),
+    i.sqrtPriceX96,
+    i.limit,
+  );
+  return [
+    bnFloor(base.base0 * k),
+    bnFloor(base.base1 * k),
+    bnFloor(limit.base0 * k),
+    bnFloor(limit.base1 * k),
+  ];
+}

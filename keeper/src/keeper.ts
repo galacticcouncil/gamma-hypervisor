@@ -4,8 +4,8 @@ import { readLastRebalanceTs, readProxyCaps } from './chain';
 import { shouldRebalance } from './decide';
 import { centeredBand, clampBandTranslation, limitRange } from './ticks';
 import { oldestObservationAgeSecs, readSlot0, readTwapTick } from './pool';
-import { readPositions, readTotalAmounts, surplusSide } from './vault';
-import { computeMins, splitForBand } from './mins';
+import { readIdleBalances, readPositions, readTotalAmounts, surplusSide } from './vault';
+import { computeCompoundMins, computeMins, splitForBand } from './mins';
 import { readOracleTick } from './oracle';
 import { sqrtPriceFromTick } from './price';
 import { preflight, type RebalanceArgs } from './preflight';
@@ -14,7 +14,7 @@ import { compoundOnce } from './compound';
 import { fetchVolBaseline } from './indexer';
 import { isReservePaused } from './moneyMarket';
 import { PriceHistory } from './priceHistory';
-import { bandMultForRegime, nextRegime, type RegimeState } from './regime';
+import { bandMultForRegime, nextRegime, type Regime, type RegimeState } from './regime';
 import { log } from './log';
 
 export interface KeeperState {
@@ -144,25 +144,158 @@ export async function startKeeper(ctx: Ctx): Promise<void> {
   log('keeper started — watching blocks');
 }
 
-export async function evaluate(ctx: Ctx, blockNumber: number, state: KeeperState): Promise<void> {
-  const { cfg, vault, pool, provider, signer } = ctx;
+interface PriceGate {
+  ok: boolean;
+  reason: string;
+  /** Where a rebalance would centre the band. Undefined when TWAP is disabled. */
+  twapTick?: number;
+  /** Feed price, for the regime machine's "moved X% in Y minutes" checks. */
+  oraclePrice?: number;
+  /** False only when the oracle could not be READ — drives regime escalation. */
+  feedHealthy: boolean;
+}
 
-  // Compounding is independent of the rebalance decision — it does not move the
-  // band, so it is not gated by the trigger, the dwell or the proxy interval.
-  if (cfg.COMPOUND_ENABLED && cfg.ADMIN_ADDRESS) {
-    const block = await provider.getBlock(blockNumber);
-    const ts = block?.timestamp ?? Math.trunc(Date.now() / 1000);
-    if (ts - state.lastCompoundTs >= cfg.COMPOUND_INTERVAL_SECS) {
-      state.lastCompoundTs = ts;
-      await compoundOnce({
-        signer,
-        admin: cfg.ADMIN_ADDRESS,
-        vault: vault.address,
-        gasLimit: cfg.GAS_LIMIT,
-        confirmations: cfg.CONFIRMATIONS,
+/**
+ * Everything that must be true about the price before we touch the pool, in one
+ * place, because both the rebalance and the compound sweep now depend on it.
+ *
+ * Compound used to fire above these checks on a bare timer. It re-mints the
+ * vault's entire idle balance at spot, which is step 2 of the Arrakis sandwich
+ * performed voluntarily on a public schedule — so it shares the same gates now,
+ * and carries execution-time bounds on top (see computeCompoundMins, since
+ * these gates only bind at decision time, one block before the tx lands).
+ *
+ * Every failure path is fail-closed. An unreadable oracle returns ok:false AND
+ * feedHealthy:false so the caller can still escalate the regime on it.
+ */
+async function checkPrice(ctx: Ctx, spotTick: number, now: number): Promise<PriceGate> {
+  const { cfg, pool } = ctx;
+  let twapTick: number | undefined;
+
+  if (cfg.TWAP_ENABLED) {
+    try {
+      const oldestAge = await oldestObservationAgeSecs(pool, now);
+      const window = Math.min(cfg.TWAP_WINDOW_SECS, oldestAge);
+      if (window < cfg.MIN_TWAP_WINDOW_SECS) {
+        return { ok: false, feedHealthy: true,
+          reason: `pool history ${oldestAge}s < MIN_TWAP_WINDOW_SECS ${cfg.MIN_TWAP_WINDOW_SECS}s — grow cardinality / wait` };
+      }
+      twapTick = await readTwapTick(pool, window);
+      const dev = Math.abs(spotTick - twapTick);
+      if (dev > cfg.MAX_DEV_TICKS) {
+        return { ok: false, feedHealthy: true, twapTick,
+          reason: `spot ${spotTick} vs TWAP(${window}s) ${twapTick} dev ${dev} > ${cfg.MAX_DEV_TICKS}` };
+      }
+      log(`  twap ok: spot ${spotTick} vs TWAP(${window}s) ${twapTick} (dev ${dev})`);
+    } catch (e: any) {
+      return { ok: false, feedHealthy: true,
+        reason: `TWAP unavailable (${e?.reason ?? e?.message ?? e}) — fail-closed` };
+    }
+  } else if (!cfg.DRY_RUN && !cfg.ALLOW_UNSAFE_SPOT) {
+    // loadConfig() already rejects this combination; belt and suspenders.
+    return { ok: false, feedHealthy: true, reason: 'TWAP disabled without ALLOW_UNSAFE_SPOT' };
+  }
+
+  // External-truth clamp: the pool (spot AND its TWAP) can be walked over time,
+  // but the exchanges these feeds aggregate cannot.
+  if (ctx.oracle) {
+    try {
+      const o = await readOracleTick({
+        feed0: ctx.oracle.feed0,
+        feed1: ctx.oracle.feed1,
+        feed0Side: cfg.ORACLE_FEED0_SIDE,
+        decimals0: ctx.decimals0,
+        decimals1: ctx.decimals1,
+        nowTs: now,
       });
+      if (o.ageSecs > cfg.ORACLE_MAX_AGE_SECS) {
+        return { ok: false, feedHealthy: true, twapTick, oraclePrice: o.price,
+          reason: `oracle stale (${o.ageSecs}s > ${cfg.ORACLE_MAX_AGE_SECS}s)` };
+      }
+      const ref = twapTick ?? spotTick;
+      const dev = Math.abs(ref - o.tick);
+      if (dev > cfg.ORACLE_MAX_DEV_TICKS) {
+        return { ok: false, feedHealthy: true, twapTick, oraclePrice: o.price,
+          reason: `pool ${ref} vs oracle ${o.tick} dev ${dev} > ${cfg.ORACLE_MAX_DEV_TICKS}` };
+      }
+      log(`  oracle ok: pool ${ref} vs oracle ${o.tick} (dev ${dev}, age ${o.ageSecs}s)`);
+      return { ok: true, reason: 'ok', twapTick, oraclePrice: o.price, feedHealthy: true };
+    } catch (e: any) {
+      return { ok: false, feedHealthy: false, twapTick,
+        reason: `oracle unreadable (${e?.reason ?? e?.message ?? e}) — fail-closed` };
     }
   }
+
+  return { ok: true, reason: 'ok', twapTick, feedHealthy: true };
+}
+
+/**
+ * Whether a due sweep may actually run.
+ *
+ * Kept pure and separate because it is the policy the Arrakis teardown produced:
+ * `compound()` hands the pool a jump in depth, which is the one thing an
+ * atomic sandwich needs, so it may only fire when the price agrees with its own
+ * hourly average AND with the external feed AND the market is calm. Previously
+ * it fired on a bare timer above all three.
+ */
+export function compoundAllowed(
+  gate: { ok: boolean; reason: string },
+  regime: Regime,
+): { run: boolean; reason: string } {
+  if (!gate.ok) return { run: false, reason: gate.reason };
+  if (regime !== 'calm') {
+    return { run: false, reason: `regime ${regime.toUpperCase()} — not sweeping into a disturbed pool` };
+  }
+  return { run: true, reason: 'ok' };
+}
+
+/**
+ * Sweep the vault's idle balance into the existing ranges, with floors on what
+ * the mint must consume. Never throws; returns whether a tx landed.
+ */
+async function runCompound(
+  ctx: Ctx,
+  sqrtPriceX96: ethers.BigNumber,
+  base: [number, number],
+): Promise<boolean> {
+  const { cfg, vault, signer } = ctx;
+  const [limitLower, limitUpper, [idle0, idle1]] = await Promise.all([
+    vault.limitLower(),
+    vault.limitUpper(),
+    readIdleBalances(ctx.token0, ctx.token1, vault.address),
+  ]);
+
+  if (idle0.isZero() && idle1.isZero()) {
+    log('  compound: nothing idle to sweep');
+    return false;
+  }
+
+  const inMin = computeCompoundMins({
+    idle0,
+    idle1,
+    sqrtPriceX96,
+    base,
+    limit: [limitLower, limitUpper],
+    toleranceBps: cfg.MINS_TOLERANCE_BPS,
+  });
+  log(
+    `  compound: sweeping idle ${idle0.toString()}/${idle1.toString()} ` +
+      `into base=[${base[0]},${base[1]}] limit=[${limitLower},${limitUpper}] ` +
+      `(inMin ${inMin.map((b) => b.toString()).join('/')}, tol ${cfg.MINS_TOLERANCE_BPS}bps)`,
+  );
+
+  return compoundOnce({
+    signer,
+    admin: cfg.ADMIN_ADDRESS!,
+    vault: vault.address,
+    inMin,
+    gasLimit: cfg.GAS_LIMIT,
+    confirmations: cfg.CONFIRMATIONS,
+  });
+}
+
+export async function evaluate(ctx: Ctx, blockNumber: number, state: KeeperState): Promise<void> {
+  const { cfg, vault, pool, provider, signer } = ctx;
 
   const { sqrtPriceX96, tick: spotTick } = await readSlot0(pool);
   const [baseLower, baseUpper] = await Promise.all([vault.baseLower(), vault.baseUpper()]);
@@ -177,128 +310,108 @@ export async function evaluate(ctx: Ctx, blockNumber: number, state: KeeperState
     rebalanceThresholdMult: cfg.REBALANCE_THRESHOLD_MULT,
   });
 
-  log(`#${blockNumber} tick=${spotTick} base=[${baseLower},${baseUpper}] ${decision.trigger ? 'TRIGGER' : 'hold'} — ${decision.reason}`);
-  if (!decision.trigger) {
-    state.dwell = 0;
-    return;
-  }
+  const block = await provider.getBlock(blockNumber);
+  const now = block?.timestamp ?? Math.trunc(Date.now() / 1000);
+
+  const compoundDue =
+    cfg.COMPOUND_ENABLED &&
+    !!cfg.ADMIN_ADDRESS &&
+    now - state.lastCompoundTs >= cfg.COMPOUND_INTERVAL_SECS;
+
+  log(
+    `#${blockNumber} tick=${spotTick} base=[${baseLower},${baseUpper}] ` +
+      `${decision.trigger ? 'TRIGGER' : 'hold'}${compoundDue ? ' +compound-due' : ''} — ${decision.reason}`,
+  );
+
+  if (!decision.trigger) state.dwell = 0;
 
   // Dwell: a single-block spike (flash-ish manipulation) cannot fire a rebalance;
   // the condition must hold across DWELL_BLOCKS consecutive evaluated blocks,
   // which costs an attacker real capital held against arbitrage. The counter
-  // resets only when the trigger clears — a gate blocking downstream (short TWAP
-  // history, stale oracle) leaves it armed, since the trigger genuinely did
-  // persist. Placement is off the TWAP regardless, so an armed counter cannot by
-  // itself move the band to a manipulated price.
-  state.dwell += 1;
-  if (state.dwell < cfg.DWELL_BLOCKS) {
-    log(`  arming: trigger ${state.dwell}/${cfg.DWELL_BLOCKS} consecutive blocks`);
-    return;
+  // resets only when the trigger clears — a gate blocking downstream leaves it
+  // armed, since the trigger genuinely did persist. Placement is off the TWAP
+  // regardless, so an armed counter cannot by itself move the band.
+  //
+  // Dwell gates the REBALANCE only. A sweep that is due still runs the gates
+  // below, because its own risk has nothing to do with whether the band moved.
+  let rebalanceArmed = decision.trigger;
+  if (decision.trigger) {
+    state.dwell += 1;
+    if (state.dwell < cfg.DWELL_BLOCKS) {
+      log(`  arming: trigger ${state.dwell}/${cfg.DWELL_BLOCKS} consecutive blocks`);
+      rebalanceArmed = false;
+    }
   }
-
-  const block = await provider.getBlock(blockNumber);
-  const now = block?.timestamp ?? Math.trunc(Date.now() / 1000);
 
   // Cooldown — mirror the on-chain proxy interval (when present) to avoid
-  // predictable reverts, and enforce our own floor either way.
-  const caps: ProxyCaps | undefined = ctx.proxy
-    ? await readProxyCaps(ctx.proxy, vault.address)
-    : undefined;
-  const minInterval = Math.max(cfg.MIN_INTERVAL_SECS, caps?.minIntervalSecs ?? 0);
-  const lastTs = Math.max(state.lastRebalanceTs, caps?.lastRebalanceTs ?? 0);
-  if (lastTs > 0 && now - lastTs < minInterval) {
-    log(`  skip: min interval (${now - lastTs}s < ${minInterval}s)`);
-    return;
-  }
-
-  // TWAP gate + placement price. Spot may only TRIGGER; the band is centered on
-  // the TWAP tick, so pushing spot cannot drag the band beyond the deviation cap.
-  let placementTick = spotTick;
-  let twapTick: number | undefined;
-  let feedHealthy = true;
-  let oraclePrice: number | undefined;
-  if (cfg.TWAP_ENABLED) {
-    try {
-      const oldestAge = await oldestObservationAgeSecs(pool, now);
-      const window = Math.min(cfg.TWAP_WINDOW_SECS, oldestAge);
-      if (window < cfg.MIN_TWAP_WINDOW_SECS) {
-        log(`  skip: pool history ${oldestAge}s < MIN_TWAP_WINDOW_SECS ${cfg.MIN_TWAP_WINDOW_SECS}s — grow cardinality / wait`);
-        return;
-      }
-      twapTick = await readTwapTick(pool, window);
-      const dev = Math.abs(spotTick - twapTick);
-      if (dev > cfg.MAX_DEV_TICKS) {
-        log(`  skip: spot ${spotTick} vs TWAP(${window}s) ${twapTick} dev ${dev} > ${cfg.MAX_DEV_TICKS}`);
-        return;
-      }
-      log(`  twap ok: spot ${spotTick} vs TWAP(${window}s) ${twapTick} (dev ${dev})`);
-      placementTick = twapTick;
-    } catch (e: any) {
-      log(`  skip: TWAP unavailable (${e?.reason ?? e?.message ?? e}) — fail-closed`);
-      return;
-    }
-  } else if (!cfg.DRY_RUN && !cfg.ALLOW_UNSAFE_SPOT) {
-    // loadConfig() already rejects this combination; belt and suspenders.
-    log('  skip: TWAP disabled without ALLOW_UNSAFE_SPOT');
-    return;
-  }
-
-  // External-truth clamp: the pool (spot AND its TWAP) can be walked over time,
-  // but Binance-fed DIA cannot. Fail closed on any oracle problem.
-  if (ctx.oracle) {
-    try {
-      const o = await readOracleTick({
-        feed0: ctx.oracle.feed0,
-        feed1: ctx.oracle.feed1,
-        decimals0: ctx.decimals0,
-        decimals1: ctx.decimals1,
-        nowTs: now,
-      });
-      if (o.ageSecs > cfg.ORACLE_MAX_AGE_SECS) {
-        log(`  skip: oracle stale (${o.ageSecs}s > ${cfg.ORACLE_MAX_AGE_SECS}s)`);
-        return;
-      }
-      const ref = twapTick ?? spotTick;
-      const dev = Math.abs(ref - o.tick);
-      if (dev > cfg.ORACLE_MAX_DEV_TICKS) {
-        log(`  skip: pool ${ref} vs oracle ${o.tick} dev ${dev} > ${cfg.ORACLE_MAX_DEV_TICKS}`);
-        return;
-      }
-      log(`  oracle ok: pool ${ref} vs oracle ${o.tick} (dev ${dev}, age ${o.ageSecs}s)`);
-      oraclePrice = o.price;
-    } catch (e: any) {
-      log(`  skip: oracle unreadable (${e?.reason ?? e?.message ?? e}) — fail-closed`);
-      feedHealthy = false;
-      // Fall through rather than returning: the regime machine needs to see an
-      // unhealthy feed so it can escalate to `extreme`, and an operator needs
-      // that logged. The rebalance is refused below regardless.
+  // predictable reverts, and enforce our own floor either way. Checked before
+  // the price gates so a cooled-down keeper does not pay for their RPC calls.
+  let caps: ProxyCaps | undefined;
+  if (rebalanceArmed) {
+    caps = ctx.proxy ? await readProxyCaps(ctx.proxy, vault.address) : undefined;
+    const minInterval = Math.max(cfg.MIN_INTERVAL_SECS, caps?.minIntervalSecs ?? 0);
+    const lastTs = Math.max(state.lastRebalanceTs, caps?.lastRebalanceTs ?? 0);
+    if (lastTs > 0 && now - lastTs < minInterval) {
+      log(`  skip: min interval (${now - lastTs}s < ${minInterval}s)`);
+      rebalanceArmed = false;
     }
   }
+
+  if (!rebalanceArmed && !compoundDue) return;
+
+  // --- price gates, shared by both actions -------------------------------
+  const gate = await checkPrice(ctx, spotTick, now);
 
   // --- volatility regime -------------------------------------------------
   // v3 cannot raise its fee when the market turns, so the vault quotes wider or
   // stops quoting. Evaluated after the gates so it can see feed health.
   let bandMult = cfg.BASE_HALF_WIDTH_MULT;
+  let regime: Regime = 'calm';
   if (cfg.REGIME_ENABLED) {
-    const decision = await evaluateRegime(ctx, state, now, feedHealthy, oraclePrice);
-    if (decision.regime === 'extreme') {
-      log(`  skip: regime EXTREME — ${decision.reason}`);
-      log(
-        '  OPERATOR ACTION: the keeper cannot pull liquidity — Admin.pullLiquidity is\n' +
-          '    onlyRebalancer and the RebalanceProxy holds that role. To pull, the Admin\n' +
-          '    holder (governance) must: 1) Admin.setRebalancer(vault, <signer>)\n' +
-          '    2) Admin.pullLiquidity(vault, ...) 3) Admin.setRebalancer(vault, <proxy>)',
-      );
-      return;
-    }
-    bandMult = bandMultForRegime(decision.regime, cfg.BASE_HALF_WIDTH_MULT, cfg.ELEVATED_HALF_WIDTH_MULT);
-    if (decision.regime === 'elevated') {
+    const d = await evaluateRegime(ctx, state, now, gate.feedHealthy, gate.oraclePrice);
+    regime = d.regime;
+    bandMult = bandMultForRegime(regime, cfg.BASE_HALF_WIDTH_MULT, cfg.ELEVATED_HALF_WIDTH_MULT);
+    if (regime === 'elevated') {
       log(`  regime elevated — widening band to mult ${bandMult} (from ${cfg.BASE_HALF_WIDTH_MULT})`);
     }
-  } else if (!feedHealthy) {
-    log('  skip: oracle unreadable and REGIME_ENABLED=false');
+  } else if (!gate.feedHealthy) {
+    log('  oracle unreadable and REGIME_ENABLED=false — refusing both actions');
     return;
   }
+
+  // --- compound: same gates, plus execution-time bounds ------------------
+  if (compoundDue) {
+    const allowed = compoundAllowed(gate, regime);
+    if (!allowed.run) {
+      log(`  compound skipped: ${allowed.reason}`);
+    } else {
+      // Stamped whether or not the tx lands, so a persistently reverting sweep
+      // backs off to the interval instead of retrying every block.
+      state.lastCompoundTs = now;
+      await runCompound(ctx, sqrtPriceX96, [baseLower, baseUpper]);
+    }
+  }
+
+  if (!rebalanceArmed) return;
+
+  if (regime === 'extreme') {
+    log(`  skip: regime EXTREME`);
+    log(
+      '  OPERATOR ACTION: the keeper cannot pull liquidity — Admin.pullLiquidity is\n' +
+        '    onlyRebalancer and the RebalanceProxy holds that role. To pull, the Admin\n' +
+        '    holder (governance) must: 1) Admin.setRebalancer(vault, <signer>)\n' +
+        '    2) Admin.pullLiquidity(vault, ...) 3) Admin.setRebalancer(vault, <proxy>)',
+    );
+    return;
+  }
+  if (!gate.ok) {
+    log(`  skip: ${gate.reason}`);
+    return;
+  }
+
+  // Spot may only TRIGGER; the band is centered on the TWAP tick, so pushing
+  // spot cannot drag the band beyond the deviation cap.
+  const placementTick = gate.twapTick ?? spotTick;
 
   const gasBal = await provider.getBalance(signer.address);
   if (gasBal.lt(cfg.gasFloorWei)) {

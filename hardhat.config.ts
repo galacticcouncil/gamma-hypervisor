@@ -44,6 +44,19 @@ const config: HardhatUserConfig = {
         ],
         timeout: 300000,
       },
+      // lark4 testnet (mainnet fork, chainId 222222). Same deployer as lark1 —
+      // Anvil#0, CREATE-whitelisted and funded there.
+      lark4: {
+        url: process.env.LARK_RPC_URL || "https://node4.lark.hydration.cloud",
+        chainId: 222222,
+        accounts: [
+          process.env.DEPLOYER_PK ||
+            "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+          process.env.BOB_PK ||
+            "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d",
+        ],
+        timeout: 300000,
+      },
       celo: {
         url: "https://forno.celo.org",
         accounts: pk(process.env.MAINNET_PRIVATE_KEY),
