@@ -1,7 +1,8 @@
-// 01-deploy — deploy the Gamma stack over lark1's live GLMR/ASTR pool.
-//   npx hardhat run lark/01-deploy.ts --network lark1
+// 01-deploy — deploy the Gamma stack over an existing Uniswap v3 pool
+// (lark4's aDOT/HOLLAR 0.3% pool by default).
+//   npx hardhat run lark/01-deploy.ts --network lark4
 import { ethers } from "hardhat";
-import { LARK, GAS, send, signers, saveDeployment, deploymentExists } from "./_shared";
+import { LARK, GAS, DEPLOY_NAME, send, signers, saveDeployment, deploymentExists } from "./_shared";
 
 // Guard config. See zombienet/deploy-gamma.ts for the rationale on each.
 const OBSERVATION_CARDINALITY = Number(process.env.OBSERVATION_CARDINALITY || 200);
@@ -40,21 +41,34 @@ const POOL_ORACLE_ABI = [
 
 async function main() {
   if (deploymentExists()) {
-    console.log("lark/deployments/lark1.json exists — delete it to redeploy. Skipping.");
+    console.log(`lark/deployments/${DEPLOY_NAME}.json exists — delete it to redeploy. Skipping.`);
     return;
   }
   const { deployer } = await signers();
   console.log(`Deployer   ${deployer.address}`);
   console.log(`v3 factory ${LARK.v3Factory}`);
-  console.log(`pool       ${LARK.pool}  (ASTR/GLMR, fee ${LARK.fee})`);
+  console.log(`pool       ${LARK.pool}  (${LARK.sym0}/${LARK.sym1}, fee ${LARK.fee})`);
 
   const HypervisorFactory = await ethers.getContractFactory("HypervisorFactory", deployer);
   const hf = await HypervisorFactory.deploy(LARK.v3Factory, { gasLimit: GAS.factory });
   await hf.deployTransaction.wait(3);
   console.log(`HypervisorFactory ${hf.address}`);
 
+  // name/symbol are ERC20 constructor args with NO setter — whatever is passed
+  // here is the LP token label a front end renders forever. Read the symbols off
+  // chain rather than hardcoding them; a stale literal once shipped a
+  // "gASTR-GLMR" vault holding aDOT/HOLLAR.
+  const SYMBOL_ABI = ["function symbol() view returns (string)"];
+  const [sym0, sym1] = await Promise.all([
+    new ethers.Contract(LARK.token0, SYMBOL_ABI, ethers.provider).symbol(),
+    new ethers.Contract(LARK.token1, SYMBOL_ABI, ethers.provider).symbol(),
+  ]);
+  const vaultName = process.env.VAULT_NAME || `Gamma ${sym0}-${sym1}`;
+  const vaultSymbol = process.env.VAULT_SYMBOL || `g${sym0}-${sym1}`;
+  console.log(`LP token   ${vaultName} (${vaultSymbol})`);
+
   await send(
-    hf.createHypervisor(LARK.token0, LARK.token1, LARK.fee, "Gamma ASTR-GLMR", "gASTR-GLMR", {
+    hf.createHypervisor(LARK.token0, LARK.token1, LARK.fee, vaultName, vaultSymbol, {
       gasLimit: GAS.createHypervisor,
     }),
     "createHypervisor (binds to existing pool)",
@@ -167,7 +181,7 @@ async function main() {
   }
 
   saveDeployment({
-    network: { name: process.env.DEPLOY_NAME || "lark1", evmRpc: LARK.rpc, chainId: LARK.chainId },
+    network: { name: DEPLOY_NAME, evmRpc: LARK.rpc, chainId: LARK.chainId },
     deployer: deployer.address,
     uniswap: { v3Factory: LARK.v3Factory, swapRouter02: LARK.swapRouter02, quoterV2: LARK.quoterV2, npm: LARK.npm },
     gamma: {
@@ -197,7 +211,7 @@ async function main() {
   });
   console.log(`\nNext: point the keeper at VAULT=${hypervisor} and run 02-fund-bob.`);
   console.log(`Then run configure-guards to route deposits through UniProxy and hand the vault to Admin:`);
-  console.log(`  DEPLOYMENTS=lark/deployments/lark1.json npx hardhat run zombienet/configure-guards.ts --network lark1`);
+  console.log(`  DEPLOYMENTS=lark/deployments/${DEPLOY_NAME}.json npx hardhat run zombienet/configure-guards.ts --network ${DEPLOY_NAME}`);
 }
 
 main().catch((e) => {

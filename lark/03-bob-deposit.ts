@@ -7,12 +7,12 @@
 //   guarded    — whitelist is UniProxy (after configure-guards.ts), so the
 //                deposit routes through ClearingV2's ratio + TWAP checks.
 //
-//   npx hardhat run lark/03-bob-deposit.ts --network lark1
+//   npx hardhat run lark/03-bob-deposit.ts --network lark4
 import { ethers } from "hardhat";
-import { ERC20_ABI, HYPERVISOR_ABI, MAX_U128, amt, fmt, loadDeployment, send, signers } from "./_shared";
+import { LARK, ERC20_ABI, HYPERVISOR_ABI, MAX_U128, amt0, amt1, fmt, fmt0, fmt1, loadDeployment, send, signers } from "./_shared";
 
-const DEPOSIT0 = amt("BOB_DEPOSIT0", "100000"); // ASTR
-const DEPOSIT1 = amt("BOB_DEPOSIT1", "100000"); // GLMR
+const DEPOSIT0 = amt0("BOB_DEPOSIT0", "20");
+const DEPOSIT1 = amt1("BOB_DEPOSIT1", "17");
 
 const UNIPROXY_ABI = [
   "function deposit(uint256,uint256,address,address,uint256[4]) returns (uint256 shares)",
@@ -38,12 +38,12 @@ async function main() {
   // Approve the HYPERVISOR in both paths. UniProxy never custodies the tokens —
   // it forwards to Hypervisor.deposit(..., from = msg.sender) and the vault does
   // transferFrom(BOB -> vault), so the allowance checked is BOB's to the vault.
-  const astr = new ethers.Contract(token0, ERC20_ABI, bob);
-  const glmr = new ethers.Contract(token1, ERC20_ABI, bob);
-  await send(astr.approve(hypervisor, MAX_U128), "BOB approve ASTR");
-  await send(glmr.approve(hypervisor, MAX_U128), "BOB approve GLMR");
+  const t0 = new ethers.Contract(token0, ERC20_ABI, bob);
+  const t1 = new ethers.Contract(token1, ERC20_ABI, bob);
+  await send(t0.approve(hypervisor, MAX_U128), `BOB approve ${LARK.sym0}`);
+  await send(t1.approve(hypervisor, MAX_U128), `BOB approve ${LARK.sym1}`);
 
-  console.log(`  depositing ${fmt(DEPOSIT0)} ASTR + ${fmt(DEPOSIT1)} GLMR...`);
+  console.log(`  depositing ${fmt0(DEPOSIT0)} ${LARK.sym0} + ${fmt1(DEPOSIT1)} ${LARK.sym1}...`);
   if (guarded) {
     // UniProxy pulls from msg.sender and mints to `to`; `pos` is the vault.
     const proxy = new ethers.Contract(uniProxy, UNIPROXY_ABI, bob);
@@ -61,7 +61,7 @@ async function main() {
   ]);
   console.log(`\n  BOB LP shares (liquid tokens): ${fmt(shares)}`);
   console.log(`  vault totalSupply:             ${fmt(supply)}`);
-  console.log(`  vault totals:                  ${fmt(totals.total0)} ASTR / ${fmt(totals.total1)} GLMR`);
+  console.log(`  vault totals:                  ${fmt0(totals.total0)} ${LARK.sym0} / ${fmt1(totals.total1)} ${LARK.sym1}`);
   console.log(`\nNext: run the keeper (it deploys this escrowed liquidity into ranges on the first rebalance).`);
 }
 

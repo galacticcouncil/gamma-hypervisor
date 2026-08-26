@@ -31,8 +31,9 @@ const config: HardhatUserConfig = {
         ],
         timeout: 120000,
       },
-      // lark1 testnet (HydraDX Frontier EVM, chainId 222222). Deployer = Anvil#0
-      // (CREATE-whitelisted + funded on lark1); second account = BOB (Anvil#1).
+      // lark1 testnet (HydraDX Frontier EVM, chainId 222222). Legacy target for
+      // the original GLMR/ASTR demo; current work runs on lark4. Deployer =
+      // Anvil#0 (CREATE-whitelisted + funded); second account = BOB (Anvil#1).
       lark1: {
         url: process.env.LARK_RPC_URL || "https://1.lark.hydration.cloud",
         chainId: 222222,

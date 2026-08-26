@@ -79,8 +79,8 @@ keeper's first rebalance an over-cap width change that skips forever. Both the
 script and the keeper detect and report this. It also works against lark:
 
 ```bash
-DEPLOYMENTS=lark/deployments/lark1.json \
-  npx hardhat run zombienet/configure-guards.ts --network lark1
+DEPLOYMENTS=lark/deployments/lark4.json \
+  npx hardhat run zombienet/configure-guards.ts --network lark4
 ```
 
 ## What the smoke proves (`smoke.ts`)

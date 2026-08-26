@@ -2,8 +2,15 @@ import { ethers } from "hardhat";
 import * as fs from "fs";
 import * as path from "path";
 
-// Target chain + Uniswap v3 stack. Defaults are lark1's GLMR/ASTR demo pool;
-// every field is overridable so the same scripts drive a different fork or pair.
+// Target chain + Uniswap v3 stack. Defaults are lark4's aDOT/HOLLAR pool; every
+// field is overridable so the same scripts drive a different fork or pair.
+//
+// Do NOT re-point these at another fork's stack and leave them as defaults. The
+// v3 contracts are deployed from the same nonce sequence on every fork, so the
+// addresses COLLIDE across chains while holding different contracts — lark1's
+// factory address is lark4's Multicall2, and lark1's NPM address is lark4's
+// V3Staker. A wrong default therefore calls the wrong contract instead of
+// failing with "no code". 00-preflight asserts the stack actually matches.
 //
 // TOKEN0/TOKEN1 must be the addresses the RUNTIME resolves for these assets. For
 // an `Erc20`-kind asset (aDOT, HOLLAR) that is the registered contract, NOT the
@@ -11,16 +18,22 @@ import * as path from "path";
 // resolveAssetAddress. Getting this wrong builds a pool the router cannot find,
 // and aDOT's alias reverts on transfer besides.
 export const LARK = {
-  rpc: process.env.LARK_RPC_URL || "https://1.lark.hydration.cloud",
+  rpc: process.env.LARK_RPC_URL || "https://node4.lark.hydration.cloud",
   chainId: Number(process.env.LARK_CHAIN_ID || 222222),
-  v3Factory: process.env.V3_FACTORY || "0x9fE46736679d2D9a65F0992F2272dE9f3c7fa6e0",
-  swapRouter02: process.env.V3_SWAP_ROUTER || "0x9A676e781A523b5d0C0e43731313A708CB607508",
-  quoterV2: process.env.V3_QUOTER || "0x0DCd1Bf9A1b36cE34237eEaFef220932846BCD82",
-  npm: process.env.V3_NPM || "0x610178dA211FEF7D417bC0e6FeD39F05609AD788",
-  pool: process.env.V3_POOL || "0x8f86fDedd41169b6CAD841535E02487d91409CF1",
+  v3Factory: process.env.V3_FACTORY || "0x5FbDB2315678afecb367f032d93F642f64180aa3",
+  swapRouter02: process.env.V3_SWAP_ROUTER || "0xA51c1fc2f0D1a1b8494Ed1FE312d7C3a78Ed91C0",
+  quoterV2: process.env.V3_QUOTER || "0xB7f8BC63BbcaD18155201308C8f3540b07f84F5e",
+  npm: process.env.V3_NPM || "0x2279B7A0a67DB372996a5FaB50D91eAA73d2eBe6",
+  pool: process.env.V3_POOL || "0xc3139a43E80c1b5C0f31CFF9A60531B7cA3898ef",
   fee: Number(process.env.V3_FEE || 3000),
-  token0: process.env.TOKEN0 || "0x0000000000000000000000000000000100000009", // ASTR
-  token1: process.env.TOKEN1 || "0x0000000000000000000000000000000100000010", // GLMR
+  token0: process.env.TOKEN0 || "0x02639ec01313c8775Fae74F2dad1118c8A8a86dA", // aDOT (asset 1001)
+  token1: process.env.TOKEN1 || "0x531a654d1696ED52e7275A8cede955E82620f99a", // HOLLAR
+  // Decimals are per-token and NOT both 18 the way ASTR/GLMR were: aDOT is 10.
+  // Formatting or parsing either side at the wrong scale is off by 1e8.
+  dec0: Number(process.env.TOKEN0_DECIMALS || 10),
+  dec1: Number(process.env.TOKEN1_DECIMALS || 18),
+  sym0: process.env.TOKEN0_SYMBOL || "aDOT",
+  sym1: process.env.TOKEN1_SYMBOL || "HOLLAR",
   weth: process.env.GAS_TOKEN || "0x0000000000000000000000000000000100000014", // gas
 };
 
@@ -63,7 +76,7 @@ export const HYPERVISOR_ABI = [
 
 // One record per target chain. Was hardcoded to lark1.json, which made a deploy
 // against any other fork either refuse to run or overwrite lark1's addresses.
-export const DEPLOY_NAME = process.env.DEPLOY_NAME || "lark1";
+export const DEPLOY_NAME = process.env.DEPLOY_NAME || "lark4";
 const DEPLOY_PATH = path.join(__dirname, "deployments", `${DEPLOY_NAME}.json`);
 
 export function deploymentExists(): boolean {
@@ -79,8 +92,15 @@ export function saveDeployment(obj: any): void {
   console.log(`wrote ${DEPLOY_PATH}`);
 }
 
+// 18-decimal helpers — correct for gas (WETH) and for vault LP shares, which are
+// always 18. Use fmt0/fmt1/amt0/amt1 for the pool tokens; aDOT is 10 decimals.
 export const fmt = (x: any, d = 18) => ethers.utils.formatUnits(x, d);
 export const amt = (env: string, def: string) => ethers.utils.parseUnits(process.env[env] || def, 18);
+
+export const fmt0 = (x: any) => ethers.utils.formatUnits(x, LARK.dec0);
+export const fmt1 = (x: any) => ethers.utils.formatUnits(x, LARK.dec1);
+export const amt0 = (env: string, def: string) => ethers.utils.parseUnits(process.env[env] || def, LARK.dec0);
+export const amt1 = (env: string, def: string) => ethers.utils.parseUnits(process.env[env] || def, LARK.dec1);
 
 export async function send(txPromise: Promise<any>, label?: string): Promise<any> {
   const tx = await txPromise;

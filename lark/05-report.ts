@@ -1,7 +1,7 @@
 // 05-report — BOB's liquid LP tokens, his share of the vault, and redeemable value.
-//   npx hardhat run lark/05-report.ts --network lark1
+//   npx hardhat run lark/05-report.ts --network lark4
 import { ethers } from "hardhat";
-import { HYPERVISOR_ABI, POOL_ABI, fmt, loadDeployment, signers } from "./_shared";
+import { LARK, HYPERVISOR_ABI, POOL_ABI, fmt, fmt0, fmt1, loadDeployment, signers } from "./_shared";
 
 async function main() {
   const D = loadDeployment();
@@ -30,12 +30,12 @@ async function main() {
   console.log(`pool tick          ${tick}`);
   console.log(`vault base range   [${bl}, ${bu}]   liquidity ${base.liquidity.toString()}`);
   console.log(`vault limit range  [${ll}, ${lu}]   liquidity ${limit.liquidity.toString()}`);
-  console.log(`vault totals       ${fmt(totals.total0)} ASTR / ${fmt(totals.total1)} GLMR`);
+  console.log(`vault totals       ${fmt0(totals.total0)} ${LARK.sym0} / ${fmt1(totals.total1)} ${LARK.sym1}`);
   console.log(`feeRecipient       ${feeRecipient}`);
   console.log(`\nBOB ${bob.address}`);
   console.log(`  LP shares (liquid tokens)  ${fmt(shares)}`);
   console.log(`  share of vault             ${pct}%`);
-  console.log(`  redeemable underlying      ${fmt(share0)} ASTR / ${fmt(share1)} GLMR`);
+  console.log(`  redeemable underlying      ${fmt0(share0)} ${LARK.sym0} / ${fmt1(share1)} ${LARK.sym1}`);
   console.log(`\n  Redeemable value above BOB's deposit = his share of collected swap fees.`);
 }
 

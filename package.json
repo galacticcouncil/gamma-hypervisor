@@ -8,12 +8,12 @@
     "flatten": "bash ./scripts/flatten.sh",
     "prettier": "prettier --write contracts/*.sol",
     "lint": "solhint contracts/*.sol",
-    "lark:deploy": "hardhat run lark/01-deploy.ts --network lark1",
-    "lark:fund-bob": "hardhat run lark/02-fund-bob.ts --network lark1",
-    "lark:bob-deposit": "hardhat run lark/03-bob-deposit.ts --network lark1",
-    "lark:fees": "hardhat run lark/04-generate-fees.ts --network lark1",
-    "lark:report": "hardhat run lark/05-report.ts --network lark1",
-    "lark:bob-withdraw": "hardhat run lark/06-bob-withdraw.ts --network lark1"
+    "lark:deploy": "hardhat run lark/01-deploy.ts --network lark4",
+    "lark:fund-bob": "hardhat run lark/02-fund-bob.ts --network lark4",
+    "lark:bob-deposit": "hardhat run lark/03-bob-deposit.ts --network lark4",
+    "lark:fees": "hardhat run lark/04-generate-fees.ts --network lark4",
+    "lark:report": "hardhat run lark/05-report.ts --network lark4",
+    "lark:bob-withdraw": "hardhat run lark/06-bob-withdraw.ts --network lark4"
   },
   "dependencies": {
     "@chainlink/contracts": "^0.1.9",
