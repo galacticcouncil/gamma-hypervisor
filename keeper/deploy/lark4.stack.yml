@@ -57,6 +57,14 @@ services:
       INDEXER_URL: https://hydration-explorer.neckwork.net/api
       INDEXER_BASE_ASSET: '5'
       INDEXER_QUOTE_ASSET: '10'
+      # REGIME_ENABLED hard-requires both of these: the regime gate also reads the
+      # money-market reserve's pause state, and an unreadable one is treated as
+      # paused. Omit them and the keeper refuses to start rather than running with
+      # a gate it cannot evaluate. MM_UNDERLYING is DOT (5) — the reserve behind
+      # aDOT — and DOT is a Token-kind asset, so its address IS the 0x..01++id alias.
+      MM_DATA_PROVIDER: '0xdf18300261edfF47b28c6a6adBCBCf468B52e5a5'
+      MM_UNDERLYING: '0x0000000000000000000000000000000100000005'
+      ADMIN_ADDRESS: '0x70e0bA845a1A0F2DA3359C97E0285013525FFC49'
 
       # Admin.advisor is still 0x0, so compound() reverts. Leave this off until
       # an advisor is set, otherwise every cycle logs a failed sweep.
