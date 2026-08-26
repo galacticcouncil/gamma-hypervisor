@@ -8,7 +8,13 @@ import { LARK, GAS, DEPLOY_NAME, send, signers, saveDeployment, deploymentExists
 const OBSERVATION_CARDINALITY = Number(process.env.OBSERVATION_CARDINALITY || 200);
 const CARDINALITY_CHUNK = Number(process.env.CARDINALITY_CHUNK || 50);
 const PRICE_THRESHOLD = Number(process.env.PRICE_THRESHOLD || 10_100); // 1% deposit deviation
-const CLEARING_TWAP_INTERVAL = Number(process.env.TWAP_INTERVAL || 600);
+// 30s on lark, deliberately. ClearingV2 calls observe() on every deposit, and observe(w)
+// reverts with OLD for any w longer than the pool has actually been running — so a long
+// window locks deposits out of a freshly created pool for exactly that long, and nobody can
+// test the vault on the day it is deployed. A short window also makes the price-deviation
+// guard nearly toothless, which is acceptable only because a fork is not worth manipulating.
+// Mainnet launches at 3600 and must match TWAP_WINDOW_SECS in uniswap-v3-deploy/mainnet/.env.
+const CLEARING_TWAP_INTERVAL = Number(process.env.TWAP_INTERVAL || 30);
 const MAX_TRANSLATION = Number(process.env.MAX_TRANSLATION || 300); // ticks per rebalance
 const MAX_WIDTH = Number(process.env.MAX_WIDTH || 300);
 const MIN_INTERVAL = Number(process.env.MIN_INTERVAL || 600); // seconds

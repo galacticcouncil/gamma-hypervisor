@@ -28,7 +28,7 @@
     "config": {
       "observationCardinality": 200,
       "priceThreshold": 10100,
-      "twapInterval": 600,
+      "twapInterval": 30,
       "maxTranslation": 300,
       "maxWidth": 300,
       "minInterval": 600,
