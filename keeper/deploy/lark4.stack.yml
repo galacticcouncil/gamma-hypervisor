@@ -1,0 +1,101 @@
+# Swarmpit stack for the Gamma keeper on lark4.
+#
+#   docker build -t <registry>/gamma-keeper:lark4 ..      (from keeper/deploy)
+#   docker push  <registry>/gamma-keeper:lark4
+#   then POST this file to Swarmpit as stack "gamma-keeper".
+#
+# PRIVATE_KEY below is Anvil account #0 — a publicly published test key with no
+# value anywhere. It is inline only because of that. Swarmpit renders stack
+# environment in its API and UI, so ANY key with real authority must come from a
+# docker secret instead, mounted at /run/secrets and read by the entrypoint.
+services:
+  keeper:
+    image: iamyaxh/gamma-keeper:lark4
+    isolation: default
+    environment:
+      # --- chain + identity ---
+      RPC_URL: https://node4.lark.hydration.cloud
+      PRIVATE_KEY: '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80'
+      VAULT: '0xFa45C2f07Cf62C543F2247E9e5B5a6acBEc762ae'
+
+      # Model B: the signer is a revocable rebalancer key and every call goes
+      # through RebalanceProxy, which enforces minInterval / maxTranslation /
+      # maxWidth on-chain. The vault itself is owned by Admin.
+      ENTRYPOINT: proxy
+      REBALANCE_PROXY: '0x4826533B4897376654Bb4d4AD88B7faFD0C98528'
+      FEE_RECIPIENT: '0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266'
+
+      # --- strategy, in multiples of the pool's 60-tick spacing ---
+      BASE_HALF_WIDTH_MULT: '10'
+      LIMIT_WIDTH_MULT: '1'
+      REBALANCE_THRESHOLD_MULT: '5'
+
+      # --- anti-manipulation gates ---
+      # Spot only triggers; the band is placed on the pool TWAP, so pushing spot
+      # cannot drag liquidity to the pushed price.
+      MIN_INTERVAL_SECS: '600'
+      DWELL_BLOCKS: '3'
+      TWAP_ENABLED: 'true'
+      TWAP_WINDOW_SECS: '3600'
+      MIN_TWAP_WINDOW_SECS: '300'
+      MAX_DEV_TICKS: '100'
+      ALLOW_UNSAFE_SPOT: 'false'
+      MINS_TOLERANCE_BPS: '1000'
+
+      # No external feed on the fork: its DIA prices are frozen at snapshot time,
+      # so an oracle clamp would compare live pool state against a stale number
+      # and skip every rebalance. Mainnet MUST enable this.
+      ORACLE_ENABLED: 'false'
+
+      # --- volatility regime (widens the band when things get loud) ---
+      REGIME_ENABLED: 'true'
+      ELEVATED_HALF_WIDTH_MULT: '30'
+      VOL_RATIO_ELEVATED: '3'
+      MOVE_15M_ELEVATED: '0.02'
+      MOVE_1H_EXTREME: '0.08'
+      REGIME_REENTRY_SECS: '7200'
+      INDEXER_URL: https://hydration-explorer.neckwork.net/api
+      INDEXER_BASE_ASSET: '5'
+      INDEXER_QUOTE_ASSET: '10'
+
+      # Admin.advisor is still 0x0, so compound() reverts. Leave this off until
+      # an advisor is set, otherwise every cycle logs a failed sweep.
+      COMPOUND_ENABLED: 'false'
+
+      # --- operational ---
+      GAS_LIMIT: '5000000'
+      GAS_FLOOR_WEI: '0'
+      CONFIRMATIONS: '3'
+      POLL_INTERVAL_MS: '6000'
+      DRY_RUN: 'false'
+    networks:
+     - default
+    logging:
+      driver: json-file
+      options:
+        max-file: '5'
+        max-size: 10m
+    deploy:
+      mode: replicated
+      replicas: 1
+      labels:
+        com.hydration.role: gamma-keeper
+      update_config:
+        parallelism: 1
+        order: stop-first
+        delay: 5s
+        failure_action: rollback
+      restart_policy:
+        condition: any
+        delay: 15s
+        window: 60s
+      resources:
+        reservations:
+          cpus: '0.05'
+          memory: 64M
+        limits:
+          cpus: '0.5'
+          memory: 256M
+networks:
+  default:
+    driver: overlay

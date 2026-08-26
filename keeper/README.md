@@ -309,3 +309,52 @@ is skipped, which is the correct failure direction.
 The floors are tight: with `MINS_TOLERANCE_BPS=1000` on a ±600-tick band, a 1%
 price push already drops consumption under them. Amounts move far faster than
 price, which is the same conversion documented in `mins.ts`.
+
+## Deploying it (Docker Swarm / Swarmpit)
+
+Running the keeper from a laptop is fine for a demo and useless for anything else —
+it stops rebalancing the moment the lid closes. `Dockerfile` and
+`deploy/lark4.stack.yml` package it as a swarm service alongside the other bots on
+`lark`.
+
+**Build for the target architecture, not yours.** The `lark` swarm host is
+`x86_64`; an image built natively on Apple Silicon is `arm64` and dies on the node
+with `exec format error` — which surfaces as a service that restarts forever with
+no useful log.
+
+```sh
+cd keeper
+docker buildx build --platform linux/amd64 -t <ns>/gamma-keeper:lark4 --push .
+```
+
+Then deploy the stack (Swarmpit API, token in `~/.config/swarmpit/token`):
+
+```sh
+python3 -c "import json;print(json.dumps({'name':'gamma-keeper','spec':{'compose':open('deploy/lark4.stack.yml').read()}}))" > /tmp/p.json
+curl -s -X POST -H "Authorization: Bearer $(cat ~/.config/swarmpit/token)" \
+     -H 'Content-Type: application/json' --data-binary @/tmp/p.json \
+     https://swarmpit.lark.hydration.cloud/api/stacks/gamma-keeper
+```
+
+Sanity-check the image before pushing — it needs no chain writes:
+
+```sh
+docker run --rm --platform linux/amd64 -e RPC_URL=… -e PRIVATE_KEY=… -e VAULT=… \
+  -e ENTRYPOINT=proxy -e REBALANCE_PROXY=… -e DRY_RUN=true \
+  <ns>/gamma-keeper:lark4 npm run smoke
+```
+
+### Two things to get right
+
+**`tsx` is a runtime dependency here.** The keeper runs its TypeScript directly
+rather than being compiled, so the image must `npm ci` *with* devDependencies.
+Setting `NODE_ENV=production` before the install drops `tsx` and the container
+starts and immediately fails to resolve its entrypoint.
+
+**The key in the stack file is visible.** Swarmpit renders stack environment in
+its API and UI, so `deploy/lark4.stack.yml` may carry Anvil #0 — a publicly
+published test key worth nothing — and nothing else. A key with real authority
+belongs in a docker secret read from `/run/secrets`, never in `environment:`.
+Model B limits the blast radius regardless: the stack key is only the *rebalancer*,
+bounded on-chain by `minInterval` / `maxTranslation` / `maxWidth`, and revocable
+via `RebalanceProxy.setRebalancer` without touching vault ownership.
