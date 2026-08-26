@@ -86,10 +86,10 @@ Defaults are sized for the lark4 pool, which is thin — see the note in
   and `amt0/amt1`; the plain `fmt`/`amt` are 18dp and are for gas and LP shares
   only.
 - **The v3 stack addresses collide across forks.** They are deployed from the same
-  nonce sequence, so lark1's factory address is lark4's Multicall2 and lark1's NPM
-  address is lark4's V3Staker. A stale default calls the *wrong contract* rather
-  than failing — `00-preflight` asserts `factory.getPool(token0, token1, fee)`
-  really is the configured pool.
+  nonce sequence, so one fork's factory address is another fork's Multicall2 and
+  its NPM address is another fork's V3Staker. A stale default calls the *wrong
+  contract* rather than failing — `00-preflight` asserts
+  `factory.getPool(token0, token1, fee)` really is the configured pool.
 - **Token addresses are not the id alias.** aDOT and HOLLAR are `Erc20`-kind
   assets living at a registered contract, not at `0x…01 ++ id`. The alias answers
   `symbol()`/`decimals()` but `getPool` against it returns the zero address.

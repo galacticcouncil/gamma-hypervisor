@@ -7,9 +7,9 @@ import * as path from "path";
 //
 // Do NOT re-point these at another fork's stack and leave them as defaults. The
 // v3 contracts are deployed from the same nonce sequence on every fork, so the
-// addresses COLLIDE across chains while holding different contracts — lark1's
-// factory address is lark4's Multicall2, and lark1's NPM address is lark4's
-// V3Staker. A wrong default therefore calls the wrong contract instead of
+// addresses COLLIDE across chains while holding different contracts — one fork's
+// factory address is another fork's Multicall2, and its NPM address is another
+// fork's V3Staker. A wrong default therefore calls the wrong contract instead of
 // failing with "no code". 00-preflight asserts the stack actually matches.
 //
 // TOKEN0/TOKEN1 must be the addresses the RUNTIME resolves for these assets. For
@@ -28,7 +28,7 @@ export const LARK = {
   fee: Number(process.env.V3_FEE || 3000),
   token0: process.env.TOKEN0 || "0x02639ec01313c8775Fae74F2dad1118c8A8a86dA", // aDOT (asset 1001)
   token1: process.env.TOKEN1 || "0x531a654d1696ED52e7275A8cede955E82620f99a", // HOLLAR
-  // Decimals are per-token and NOT both 18 the way ASTR/GLMR were: aDOT is 10.
+  // Decimals are per-token, not both 18: aDOT is 10dp, HOLLAR is 18dp.
   // Formatting or parsing either side at the wrong scale is off by 1e8.
   dec0: Number(process.env.TOKEN0_DECIMALS || 10),
   dec1: Number(process.env.TOKEN1_DECIMALS || 18),
@@ -74,8 +74,8 @@ export const HYPERVISOR_ABI = [
   "function setWhitelist(address)",
 ];
 
-// One record per target chain. Was hardcoded to lark1.json, which made a deploy
-// against any other fork either refuse to run or overwrite lark1's addresses.
+// One record per target chain. A single hardcoded filename made a deploy against
+// any other fork either refuse to run or overwrite the earlier fork's addresses.
 export const DEPLOY_NAME = process.env.DEPLOY_NAME || "lark4";
 const DEPLOY_PATH = path.join(__dirname, "deployments", `${DEPLOY_NAME}.json`);
 

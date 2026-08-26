@@ -56,8 +56,8 @@ async function main() {
 
   // name/symbol are ERC20 constructor args with NO setter — whatever is passed
   // here is the LP token label a front end renders forever. Read the symbols off
-  // chain rather than hardcoding them; a stale literal once shipped a
-  // "gASTR-GLMR" vault holding aDOT/HOLLAR.
+  // chain rather than hardcoding them; a stale literal once shipped a vault
+  // whose label named a different pair than the one it actually held.
   const SYMBOL_ABI = ["function symbol() view returns (string)"];
   const [sym0, sym1] = await Promise.all([
     new ethers.Contract(LARK.token0, SYMBOL_ABI, ethers.provider).symbol(),
