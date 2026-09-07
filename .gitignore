@@ -11,6 +11,7 @@ node_modules
 !/zombienet/**
 !/keeper/**
 !/lark/**
+!/mainnet/**
 !/.gitignore
 !/.env.example
 !/hardhat.config.ts

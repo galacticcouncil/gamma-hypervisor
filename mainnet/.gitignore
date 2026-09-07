@@ -1,0 +1,7 @@
+# Every .env variant — real runs carry DEPLOYER_PK. `.env` alone is not enough:
+# a stray backup like .env.backup or .env.lark4 would silently redirect a
+# mainnet command at another chain.
+.env*
+!.env.example
+node_modules/
+deployments/
