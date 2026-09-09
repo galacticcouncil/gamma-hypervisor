@@ -60,6 +60,24 @@ async function main() {
   const confirmations = Number(env("CONFIRMATIONS", "2"));
   const skipOwnership = env("SKIP_OWNERSHIP", "false") === "true";
   const governance = env("GOVERNANCE_ADDRESS", d.governance);
+  // Per-role owner targets. Unset => GOVERNANCE_ADDRESS, so an unconfigured run
+  // reproduces the single-address behaviour exactly.
+  //
+  // Why this exists: every Gamma lever is plain `onlyOwner`, so there is no
+  // narrow "emergency" capability to delegate — the only granularity available
+  // is WHICH CONTRACT a role sits on. Putting ClearingV2 on the Technical
+  // Committee's dispatch identity (0xaa7e…aa7e1, `dispatchAsEmergencyAdmin`,
+  // origin Root|TechCommitteeMajority) makes `pause(true)` a TC motion instead
+  // of a ~7-day track-9 referendum. It also hands the TC the deposit perimeter
+  // — setTwapCheck / appendList / setDepositOverride — so it is a trust
+  // decision, not a free win. Root still reaches all of these, so governance
+  // keeps full access; only the cheap track changes.
+  const roleTarget = (name) => {
+    const v = env(name, governance);
+    if (!ethers.isAddress(v || "")) throw new Error(`${name} is not an address: ${v}`);
+    if (same(v, wallet.address)) throw new Error(`${name} is the deploy key — that is not a handover`);
+    return ethers.getAddress(v);
+  };
   const keeper = env("KEEPER_ADDRESS", d.keeper);
   const feeRecipient = env("FEE_RECIPIENT", d.feeRecipient || "");
   if (!ethers.isAddress(governance || "")) throw new Error("GOVERNANCE_ADDRESS is required");
@@ -143,8 +161,8 @@ async function main() {
   if (guardProblems.length) {
     throw new Error("ClearingV2 is not launch-ready:\n    " + guardProblems.join("\n    "));
   }
-  if (!same(clearingOwner, wallet.address) && !same(clearingOwner, governance)) {
-    throw new Error(`ClearingV2 owner is ${clearingOwner} — neither this key nor governance`);
+  if (!same(clearingOwner, wallet.address) && !same(clearingOwner, roleTarget("CLEARING_OWNER"))) {
+    throw new Error(`ClearingV2 owner is ${clearingOwner} — neither this key nor CLEARING_OWNER`);
   }
   console.log("    guards are launch-ready");
 
@@ -287,19 +305,20 @@ async function main() {
   // --- 7. peripheral owners = governance ---------------------------------
   console.log("\n[7] peripheral ownership -> governance");
   const transfers = [
-    ["ClearingV2", () => clearing.owner(), async () => clearing.transferOwnership(governance, await overrides())],
-    ["UniProxy", () => uniProxy.owner(), async () => uniProxy.transferOwnership(governance, await overrides())],
-    ["RebalanceProxy", () => proxy.owner(), async () => proxy.transferOwner(governance, await overrides())],
-    ["HypervisorFactory", () => hyperFactory.owner(), async () => hyperFactory.transferOwnership(governance, await overrides())],
+    ["ClearingV2", roleTarget("CLEARING_OWNER"), () => clearing.owner(), async (t) => clearing.transferOwnership(t, await overrides())],
+    ["UniProxy", roleTarget("UNIPROXY_OWNER"), () => uniProxy.owner(), async (t) => uniProxy.transferOwnership(t, await overrides())],
+    ["RebalanceProxy", roleTarget("REBALANCEPROXY_OWNER"), () => proxy.owner(), async (t) => proxy.transferOwner(t, await overrides())],
+    ["HypervisorFactory", roleTarget("FACTORY_OWNER"), () => hyperFactory.owner(), async (t) => hyperFactory.transferOwnership(t, await overrides())],
   ];
-  for (const [label, read, write] of transfers) {
+  for (const [label, target, read, write] of transfers) {
     const current = await read();
-    if (same(current, governance)) {
-      console.log(`    ${label} already owned by governance`);
+    const note = same(target, governance) ? "" : "  (NOT the default governance address)";
+    if (same(current, target)) {
+      console.log(`    ${label} already owned by ${target}${note}`);
     } else if (same(current, wallet.address)) {
-      await send(write(), `${label}.transferOwnership(${governance})`);
+      await send(write(target), `${label}.transferOwnership(${target})${note}`);
     } else {
-      throw new Error(`${label} owner is ${current} — neither this key nor governance`);
+      throw new Error(`${label} owner is ${current} — neither this key nor its configured target ${target}`);
     }
   }
 
@@ -309,12 +328,21 @@ async function main() {
   if (same(finalAdmin, governance)) {
     console.log("    Admin already held by governance");
   } else if (same(finalAdmin, wallet.address)) {
-    await send(admin.transferAdmin(governance, await overrides()), `admin.transferAdmin(${governance}) — this key is now retired`);
+    await send(admin.transferAdmin(roleTarget("ADMIN_ADMIN"), await overrides()), `admin.transferAdmin(${roleTarget("ADMIN_ADMIN")}) — this key is now retired`);
   } else {
     throw new Error(`Admin.admin is ${finalAdmin}, not this key — cannot transfer`);
   }
 
   d.config = { ...(d.config || {}), posture: "production" };
+  // Record where each role actually went, so 04-verify.js checks the real split
+  // instead of assuming one governance address for all five.
+  d.roles = {
+    ADMIN_ADMIN: roleTarget("ADMIN_ADMIN"),
+    CLEARING_OWNER: roleTarget("CLEARING_OWNER"),
+    UNIPROXY_OWNER: roleTarget("UNIPROXY_OWNER"),
+    REBALANCEPROXY_OWNER: roleTarget("REBALANCEPROXY_OWNER"),
+    FACTORY_OWNER: roleTarget("FACTORY_OWNER"),
+  };
   const p = saveJson(path.join("deployments", `${net}.json`), d);
   console.log(`\n  Wrote ${p}`);
   console.log("\n=== PRODUCTION posture ===");

@@ -77,6 +77,9 @@ async function verify() {
   const provider = new ethers.JsonRpcProvider(env("EVM_RPC_URL", d.network.evmRpc));
   const network = await provider.getNetwork();
   const governance = env("GOVERNANCE_ADDRESS", d.governance);
+  // Per-role owner expectations, recorded by the handover. Unset => governance,
+  // which reproduces the original single-address check.
+  const roleTarget = (name) => env(name, d.roles?.[name] ?? governance);
   const keeper = env("KEEPER_ADDRESS", d.keeper);
   const handedOver = env("EXPECT_POSTURE", d.config?.posture ?? "production") === "production";
 
@@ -113,11 +116,11 @@ async function verify() {
   head("ownership");
   const roles = [
     ["hypervisor.owner()", await vault.owner(), handedOver ? g.admin : d.deployer],
-    ["admin.admin()", await admin.admin(), handedOver ? governance : d.deployer],
-    ["clearing.owner()", await clearing.owner(), handedOver ? governance : d.deployer],
-    ["uniProxy.owner()", await uniProxy.owner(), handedOver ? governance : d.deployer],
-    ["rebalanceProxy.owner()", await proxy.owner(), handedOver ? governance : d.deployer],
-    ["hypervisorFactory.owner()", await hyperFactory.owner(), handedOver ? governance : d.deployer],
+    ["admin.admin()", await admin.admin(), handedOver ? roleTarget("ADMIN_ADMIN") : d.deployer],
+    ["clearing.owner()", await clearing.owner(), handedOver ? roleTarget("CLEARING_OWNER") : d.deployer],
+    ["uniProxy.owner()", await uniProxy.owner(), handedOver ? roleTarget("UNIPROXY_OWNER") : d.deployer],
+    ["rebalanceProxy.owner()", await proxy.owner(), handedOver ? roleTarget("REBALANCEPROXY_OWNER") : d.deployer],
+    ["hypervisorFactory.owner()", await hyperFactory.owner(), handedOver ? roleTarget("FACTORY_OWNER") : d.deployer],
   ];
   for (const [label, actual, expected] of roles) eq(label, actual, expected);
   if (handedOver) {
