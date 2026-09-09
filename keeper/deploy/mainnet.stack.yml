@@ -1,0 +1,154 @@
+# Gamma keeper — Hydration MAINNET. Deploy as Swarmpit stack "gamma".
+#
+# Image: built from gamma-hypervisor ys-zombienet-deploy @ 18e153a. The keeper's
+# runtime code last changed at ddbe2cb (2026-08-26); everything since touched
+# only stack files and the mainnet deploy directory.
+#
+#   git clone --branch ys-zombienet-deploy --single-branch \
+#     https://github.com/galacticcouncil/gamma-hypervisor.git
+#   cd gamma-hypervisor/keeper
+#   docker build -t galacticcouncil/gamma-keeper:18e153a .
+#   docker push galacticcouncil/gamma-keeper:18e153a
+#
+# NOTE: PRIVATE_KEY is inline below by choice. Swarmpit renders stack environment
+# in its API and UI, so anyone with Swarmpit access can read this key. Model B is
+# what bounds that: the key is only RebalanceProxy.rebalancers[vault] and
+# Admin.advisors[vault] — capped on-chain by minInterval / maxTranslation /
+# maxWidth, unable to withdraw or pull liquidity, and revocable via
+# RebalanceProxy.setRebalancer without touching vault ownership. It cannot be
+# revoked quickly though: post-handover that is a track-9 referendum (~7 days).
+# See note-gamma-adot-hollar-alm-spec §C.1 for what it can still cost you.
+services:
+  keeper:
+    # Pinned by digest as well as tag: a tag can be overwritten, a digest cannot.
+    # Resolves to linux/amd64 sha256:57f30dad446e9a7910794a7ff21b6ede3d115cb90ce6f2afca3866783ae3c1b6
+    # (138,485,385 B), pushed 2026-09-08. A `latest` tag also exists in the org and
+    # carries the SAME amd64 image — do not use it here: Swarmpit autoredeploy plus
+    # a moving tag gives a stop-first restart roughly every 60s that still reads as
+    # healthy, which is the worst failure mode for a keeper. Keep autoredeploy OFF.
+    image: galacticcouncil/gamma-keeper:18e153a@sha256:cc4491fa16160ef1a6d89cb56c41198dae00e74dfbaa1e1ac12a37f1f2ba0bfd
+    environment:
+      # --- signer ---
+      PRIVATE_KEY: '0x<64 hex — the keeper key for 0x0B0bE14C1158Ba09B720812e70F819366614Cb96>'
+
+      # --- chain + identity ---
+      RPC_URL: https://rpc.hydradx.cloud
+      VAULT: '0xa206D0959813f17c17C87147271C49065438648A'
+
+      # Model B: signer is the revocable rebalancer; every call goes through
+      # RebalanceProxy. The vault is owned by Admin (after handover).
+      ENTRYPOINT: proxy
+      REBALANCE_PROXY: '0x8B7Dd119b7edb85D9cF166129DBec5D88DC78C94'
+      ADMIN_ADDRESS: '0x8fc8a0d7cb9c6B2366Ec08f1Bf03067D54b67bc5'
+      # Treasury H160. MUST equal the vault's configured FEE_RECIPIENT —
+      # rebalance() re-asserts it every call, so a mismatch silently redirects
+      # the Gamma skim.
+      FEE_RECIPIENT: '0x6d6f646c70792f74727372790000000000000000'
+
+      # --- strategy, in multiples of the pool's 60-tick spacing ---
+      # 16 * 60 = 960 ticks = +10.08%/-9.16%; matches the band the handover sets
+      # and stays inside RebalanceProxy.maxWidth=300. Do not change one without
+      # the other or the proxy reverts with "Exceeds width delta" and the keeper
+      # skips forever, silently.
+      BASE_HALF_WIDTH_MULT: '16'
+      LIMIT_WIDTH_MULT: '1'
+      # 11/16 = 69% of the half-width: spec §D2's "re-centre at 70% displacement".
+      REBALANCE_THRESHOLD_MULT: '11'
+
+      # --- anti-manipulation gates ---
+      # Spot only triggers; the band is placed on the pool TWAP.
+      MIN_INTERVAL_SECS: '21600'
+      DWELL_BLOCKS: '900'
+      TWAP_ENABLED: 'true'
+      TWAP_WINDOW_SECS: '3600'
+      MIN_TWAP_WINDOW_SECS: '3000'
+      MAX_DEV_TICKS: '50'
+      ALLOW_UNSAFE_SPOT: 'false'
+      MINS_TOLERANCE_BPS: '1000'
+
+      # --- external oracle clamp (required at launch) ---
+      ORACLE_ENABLED: 'true'
+      ORACLE_FEED0: '0xFBCa0A6dC5B74C042DF23025D99ef0F1fcAC6702'
+      # aDOT is token0 (both Erc20, sorted by contract: 0x0263... < 0x531a...)
+      # and the DOT/USD feed prices that side. Wrong value = oracle tick far from
+      # the pool = every rebalance silently skipped. Set explicitly, never left
+      # to a default.
+      ORACLE_FEED0_SIDE: token0
+      # 8h, NOT the example's 600s. Economics study P1: measured DIA age is
+      # median 55min, p90 3.6h, max 7.4h — observed 2238s and 2799s on
+      # 2026-09-08. At 600s the clamp treats a healthy feed as stale and skips
+      # every rebalance. Matches the deploy config's STALE_SECONDS=28800.
+      ORACLE_MAX_AGE_SECS: '28800'
+      ORACLE_MAX_DEV_TICKS: '50'
+
+      # --- volatility regime (widens the band when things get loud) ---
+      REGIME_ENABLED: 'true'
+      ELEVATED_HALF_WIDTH_MULT: '30'
+      VOL_RATIO_ELEVATED: '3'
+      REGIME_REENTRY_SECS: '7200'
+      # REGIME_ENABLED hard-requires the money-market pair below: the gate also
+      # reads the reserve's pause state and treats an unreadable one as paused.
+      MM_DATA_PROVIDER: '0xdf18300261edfF47b28c6a6adBCBCf468B52e5a5'
+      MM_UNDERLYING: '0x0000000000000000000000000000000100000005'
+      INDEXER_URL: https://hydration-explorer.neckwork.net/api
+      INDEXER_BASE_ASSET: '5'
+      INDEXER_QUOTE_ASSET: '10'
+      INDEXER_TIMEOUT_MS: '5000'
+      VOL_BASELINE_DAYS: '30'
+      VOL_BASELINE_REFRESH_SECS: '3600'
+
+      # Off until the vault is seeded: compounding an empty vault reverts and
+      # logs a failed sweep every interval. Flip to true after the seed.
+      COMPOUND_ENABLED: 'false'
+      COMPOUND_INTERVAL_SECS: '300'
+
+      # --- operational ---
+      # Minimum WETH (asset 20) balance to act; below it the keeper skips and
+      # logs why. NOT the example's 1e18 (1 WETH), and not 5e16 either — the
+      # keeper overrides only gasLimit, never gas price, so worst case is
+      # GAS_LIMIT x eth_gasPrice = 3e6 x ~5.37e6 = 0.0000161 WETH per tx.
+      # 0.001 WETH therefore holds ~62 full-gas transactions in reserve, which
+      # is roughly a month at the <=2 rebalances/day cap — enough runway to
+      # notice and top up. Fund the key with ~0.01 WETH total.
+      GAS_FLOOR_WEI: '1000000000000000'
+      GAS_LIMIT: '3000000'
+      CONFIRMATIONS: '3'
+      POLL_INTERVAL_MS: '2000'
+      STARTUP_LOOKBACK_BLOCKS: '150000'
+      # TRUE until 03-handover.js runs. Pre-handover Hypervisor.owner is still
+      # the deploy key, so Admin.rebalance -> Hypervisor.rebalance reverts.
+      # Dry run validates config, RPC, gates and band maths without sending.
+      DRY_RUN: 'true'
+    networks:
+      - default
+    logging:
+      driver: json-file
+      options:
+        max-file: '5'
+        max-size: 10m
+    deploy:
+      mode: replicated
+      replicas: 1
+      labels:
+        com.hydration.role: gamma-keeper
+      # placement:
+      #   constraints: [node.hostname == <host>]
+      update_config:
+        parallelism: 1
+        order: stop-first
+        delay: 5s
+        failure_action: rollback
+      restart_policy:
+        condition: any
+        delay: 15s
+        window: 60s
+      resources:
+        reservations:
+          cpus: '0.05'
+          memory: 64M
+        limits:
+          cpus: '0.5'
+          memory: 256M
+networks:
+  default:
+    driver: overlay
