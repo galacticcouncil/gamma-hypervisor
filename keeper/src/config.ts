@@ -116,6 +116,19 @@ const Env = z
 
     GAS_FLOOR_WEI: z.string().regex(/^\d+$/).default('0'),
     GAS_LIMIT: z.coerce.number().int().positive().default(3_000_000),
+    // Markup over the chain's own eth_gasPrice quote, in percent.
+    //
+    // Pricing MUST be pinned rather than left to ethers: ethers v5's
+    // getFeeData() attaches a HARDCODED 1.5 gwei maxPriorityFeePerGas, while
+    // Hydration's entire base fee is ~0.0054 gwei — an unpinned transaction
+    // pays ~276x what it needs to. Measured on mainnet 2026-09-09: base
+    // 5,445,691 wei vs ethers' effective 1,505,445,691 wei, which at 288
+    // compounds/day is 0.13 WETH/day instead of 0.00047.
+    //
+    // 20% is headroom against a quote moving between read and inclusion. It
+    // must be > 0: an under-priced transaction on Hydration is dropped at
+    // apply WITHOUT producing a receipt, and the caller then waits forever.
+    GAS_PRICE_MARKUP_PCT: z.coerce.number().int().positive().default(20),
     CONFIRMATIONS: z.coerce.number().int().nonnegative().default(3),
     POLL_INTERVAL_MS: z.coerce.number().int().positive().default(2000),
 

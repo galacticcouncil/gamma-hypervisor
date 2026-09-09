@@ -1,4 +1,4 @@
-import type { Ctx } from './chain';
+import { txOverrides, type Ctx } from './chain';
 import { toCallArgs, type RebalanceArgs } from './preflight';
 
 export async function submitRebalance(ctx: Ctx, a: RebalanceArgs): Promise<string> {
@@ -6,7 +6,7 @@ export async function submitRebalance(ctx: Ctx, a: RebalanceArgs): Promise<strin
   // Hydration retains pending nonces oddly; pin the 'pending' nonce explicitly and
   // wait for several confirmations to avoid the stale-pending "nonce too low" failure.
   const nonce = await signer.getTransactionCount('pending');
-  const overrides = { nonce, gasLimit: cfg.GAS_LIMIT };
+  const overrides = await txOverrides(ctx, { nonce });
   const tx = ctx.proxy
     ? await ctx.proxy.rebalance(ctx.vault.address, ...toCallArgs(a), overrides)
     : await ctx.vault.rebalance(...toCallArgs(a), overrides);

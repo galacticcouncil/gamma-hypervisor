@@ -38,6 +38,8 @@ export interface CompoundInput {
   /** Floors on what the base and limit mints must consume. Never all-zero. */
   inMin: ethers.BigNumber[];
   gasLimit: number;
+  /** Explicit legacy gasPrice; see config.ts GAS_PRICE_MARKUP_PCT. */
+  gasPrice: ethers.BigNumber;
   confirmations: number;
 }
 
@@ -50,7 +52,7 @@ export async function compoundOnce(i: CompoundInput): Promise<boolean> {
     // advisor" or nothing to harvest) and must not cost gas or kill the loop.
     await admin.callStatic[BOUNDED](i.vault, i.inMin);
 
-    const tx = await admin[BOUNDED](i.vault, i.inMin, { gasLimit: i.gasLimit });
+    const tx = await admin[BOUNDED](i.vault, i.inMin, { gasLimit: i.gasLimit, gasPrice: i.gasPrice });
     log(`  compound submitted ${tx.hash}`);
     await tx.wait(i.confirmations);
     log('  ✓ compounded');

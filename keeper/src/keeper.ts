@@ -9,6 +9,7 @@ import { computeCompoundMins, computeMins, splitForBand } from './mins';
 import { readOracleTick } from './oracle';
 import { sqrtPriceFromTick } from './price';
 import { preflight, type RebalanceArgs } from './preflight';
+import { txOverrides } from './chain';
 import { submitRebalance } from './submit';
 import { compoundOnce } from './compound';
 import { fetchVolBaseline } from './indexer';
@@ -290,6 +291,7 @@ async function runCompound(
     vault: vault.address,
     inMin,
     gasLimit: cfg.GAS_LIMIT,
+    gasPrice: (await txOverrides(ctx)).gasPrice as ethers.BigNumber,
     confirmations: cfg.CONFIRMATIONS,
   });
 }

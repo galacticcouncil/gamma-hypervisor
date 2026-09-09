@@ -111,6 +111,11 @@ services:
       # is roughly a month at the <=2 rebalances/day cap — enough runway to
       # notice and top up. Fund the key with ~0.01 WETH total.
       GAS_FLOOR_WEI: '1000000000000000'
+      # Markup over the chain's eth_gasPrice quote. Pinned deliberately: ethers
+      # v5 otherwise attaches a hardcoded 1.5 gwei tip against Hydration's
+      # ~0.0054 gwei base fee — a 276x overpay. Must stay > 0, since an
+      # under-priced tx is dropped at apply with no receipt.
+      GAS_PRICE_MARKUP_PCT: '20'
       GAS_LIMIT: '3000000'
       CONFIRMATIONS: '3'
       POLL_INTERVAL_MS: '2000'

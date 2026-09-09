@@ -147,3 +147,21 @@ export async function readLastRebalanceTs(ctx: Ctx): Promise<number> {
     return 0;
   }
 }
+
+/**
+ * Transaction overrides with an EXPLICIT legacy gasPrice.
+ *
+ * Never leave pricing to ethers here — see GAS_PRICE_MARKUP_PCT in config.ts. Passing
+ * `gasPrice` also keeps the transaction legacy-typed, so no 1.5 gwei tip is
+ * attached. An under-priced transaction on Hydration is dropped at apply
+ * without producing a receipt, which is why this is a multiple of the chain's
+ * own quote rather than a constant.
+ */
+export async function txOverrides(
+  ctx: Pick<Ctx, 'provider' | 'cfg'>,
+  extra: Record<string, unknown> = {},
+): Promise<Record<string, unknown>> {
+  const base = ethers.BigNumber.from(await ctx.provider.send('eth_gasPrice', []));
+  const gasPrice = base.mul(100 + ctx.cfg.GAS_PRICE_MARKUP_PCT).div(100);
+  return { gasPrice, gasLimit: ctx.cfg.GAS_LIMIT, ...extra };
+}
