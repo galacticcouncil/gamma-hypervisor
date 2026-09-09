@@ -4,19 +4,30 @@
  *
  *   1. verify the Model B wiring is complete   (else the vault becomes unrebalanceable)
  *   2. verify the ClearingV2 guards match the config (last chance without a referendum)
- *   3. set the launch band                     (owner action, vault must still be empty)
- *   4. whitelist = UniProxy                    (every deposit now passes ClearingV2)
- *   5. vault owner = Admin                     (keeper reaches rebalance only through the proxy caps)
- *   6. ClearingV2, UniProxy, RebalanceProxy, HypervisorFactory owner = governance
- *   7. Admin.admin = governance                LAST — it retires this key entirely
+ *   3. check the pool price against the feed  (READ-ONLY gate; see below)
+ *   4. set the launch band                     (owner action, vault must still be empty)
+ *   5. whitelist = UniProxy                    (every deposit now passes ClearingV2)
+ *   6. vault owner = Admin                     (keeper reaches rebalance only through the proxy caps)
+ *   7. ClearingV2, UniProxy, RebalanceProxy, HypervisorFactory owner = governance
+ *   8. Admin.admin = governance                LAST — it retires this key entirely
  *
- * Step 6 is the one a port of the testnet script forgets. Leaving those four
+ * Step 7 is the one a port of the testnet script forgets. Leaving those four
  * with the deploy key keeps the entire Model B story theoretical: that key could
  * `UniProxy.transferClearance` to a clearing contract with no TWAP or ratio
  * guard at all, or `RebalanceProxy.exemptHypervisor` to drop every cap.
  *
+ * Step 3 is READ-ONLY and it is a gate, not an action. An empty pool's price is
+ * frozen at whatever `initialize()` set, and the launch band in step 4 is
+ * centred on it — so a stale price here becomes a band the keeper is not
+ * allowed to move (RebalanceProxy's `customDiff`) and a seed that gets
+ * arbitraged for the whole gap. Correcting it is `11-anchor-price.js`, a
+ * separate one-off run by whoever holds a little of both tokens. This script
+ * refuses to proceed on a bad price rather than moving a market itself.
+ *
  * Idempotent: every step reads current state first, so it is safe to re-run.
- * SKIP_OWNERSHIP=true stops after step 4 (testnets only).
+ * SKIP_OWNERSHIP=true stops after step 5 (testnets only).
+ * SKIP_PRICE_CHECK=true bypasses step 3 — a chain with no feed, or a pool whose
+ * current price you have decided is the right one.
  */
 
 const path = require("path");
@@ -31,6 +42,11 @@ const {
   waitForSuccess,
   loadDeployments,
   saveJson,
+  resolveOraclePriceE18,
+  priceE18FromSqrtPriceX96,
+  sqrtPriceX96FromPriceE18,
+  tickDeltaBetweenSqrt,
+  fmtE18,
   ABI,
 } = require("./lib");
 
@@ -100,7 +116,7 @@ async function main() {
   console.log("    wiring complete");
 
   // --- 2. ClearingV2 guards ----------------------------------------------
-  // After step 6 only a referendum can change these, so this is the last cheap
+  // After step 7 only a referendum can change these, so this is the last cheap
   // chance to notice a mismatch with the reviewed configuration.
   console.log("\n[2] ClearingV2 guards");
   const [twapCheck, twapInterval, priceThreshold, position, clearingOwner] = await Promise.all([
@@ -132,8 +148,82 @@ async function main() {
   }
   console.log("    guards are launch-ready");
 
-  // --- 3. launch band -----------------------------------------------------
-  console.log("\n[3] launch band");
+  // --- 3. pool price sanity -----------------------------------------------
+  //
+  // Read-only. This step moves nothing; it refuses to proceed on a price that
+  // would poison everything after it.
+  //
+  // An empty pool cannot be arbitraged, so its price is frozen at whatever
+  // `initialize()` set and drifts further from the market every day. Step 4
+  // centres the launch band on that price, and RebalanceProxy's `customDiff`
+  // caps how far the keeper may later move the band — so a band placed on a
+  // stale price cannot be walked back without a referendum, and the first real
+  // liquidity is arbitraged for the whole gap.
+  //
+  // Correcting the price is `11-anchor-price.js`, run BEFORE this script by
+  // whoever holds a little of both tokens. Deliberately a separate, one-off
+  // job: it needs token inventory this key does not have, and the handover
+  // should never move a market price as a side effect.
+  console.log("\n[3] pool price");
+  const maxDevTicks = Number(env("ANCHOR_MAX_DEV_TICKS", "200"));
+  if (!Number.isInteger(maxDevTicks) || maxDevTicks < 1) {
+    throw new Error("ANCHOR_MAX_DEV_TICKS must be a positive integer");
+  }
+
+  if (env("SKIP_PRICE_CHECK", "false") === "true") {
+    console.log(`    ${isMainnet() ? "\u26a0 " : ""}SKIP_PRICE_CHECK=true — the band will sit on the pool's current price, unchecked`);
+  } else {
+    const token0 = new ethers.Contract(d.uniswap.token0, ABI.erc20, provider);
+    const token1 = new ethers.Contract(d.uniswap.token1, ABI.erc20, provider);
+    const [slot0, dec0, dec1] = await Promise.all([pool.slot0(), token0.decimals(), token1.decimals()]);
+    // A feed that is missing or stale must not silently pass this gate — but it
+    // must not dead-end the handover either. `00-preflight.js` treats an absent
+    // PRICE_FEED_A as a note, so an operator can reach this point without one,
+    // and DIA's measured max age (7.4h) sits close to the 8h default.
+    let oracle;
+    try {
+      oracle = await resolveOraclePriceE18(ethers, provider, Number(env("STALE_SECONDS", "28800")));
+    } catch (error) {
+      throw new Error(
+        `cannot read the price feed, so the pool price cannot be checked: ${error.message}\n` +
+          `    Set PRICE_FEED_A (mainnet DOT/USD is 0xFBCa0A6dC5B74C042DF23025D99ef0F1fcAC6702),\n` +
+          `    raise STALE_SECONDS if the feed is merely old, or set SKIP_PRICE_CHECK=true to\n` +
+          `    hand over onto the pool's current price without checking it.`
+      );
+    }
+    const poolE18 = priceE18FromSqrtPriceX96(slot0.sqrtPriceX96, Number(dec0), Number(dec1));
+    const targetSqrt = sqrtPriceX96FromPriceE18(oracle.priceE18, Number(dec0), Number(dec1));
+    const devTicks = tickDeltaBetweenSqrt(slot0.sqrtPriceX96, targetSqrt);
+
+    console.log(`    pool   ${fmtE18(poolE18)}  tick ${slot0.tick}`);
+    console.log(`    feed   ${fmtE18(oracle.priceE18)}  (age ${oracle.age}s)`);
+    console.log(`    off by ${devTicks} ticks (tolerance ${maxDevTicks})`);
+    if (Math.abs(devTicks) > maxDevTicks) {
+      throw new Error(
+        `the pool is ${devTicks} ticks from the feed — too far to place a launch band on.\n` +
+          `    Run 11-anchor-price.js first (it needs a little of both tokens, and returns them),\n` +
+          `    then re-run this. Or set SKIP_PRICE_CHECK=true to accept the band being placed here.`
+      );
+    }
+    console.log("    price is close enough to place a band on");
+
+    // Not a gate — the handover does not deposit. But an operator who has just
+    // anchored will otherwise hand over a live vault and be surprised when the
+    // first deposit reverts, so say it here rather than let them find out.
+    try {
+      await clearing.checkPriceChange(g.hypervisor, twapInterval, priceThreshold);
+      console.log("    deposits will clear: spot agrees with the pool's hourly average");
+    } catch {
+      console.log(
+        `    ! deposits will REVERT for now — spot is still more than the ${priceThreshold} threshold\n` +
+          `      away from the ${twapInterval}s average (normal right after an anchor; it settles in ~50-60 min).\n` +
+          `      The handover itself is unaffected.`
+      );
+    }
+  }
+
+  // --- 4. launch band -----------------------------------------------------
+  console.log("\n[4] launch band");
   const spacing = Number(await vault.tickSpacing());
   const [baseLower, baseUpper, total] = await Promise.all([vault.baseLower(), vault.baseUpper(), vault.getTotalAmounts()]);
   const owner = await vault.owner();
@@ -167,8 +257,8 @@ async function main() {
     console.log(`    band already set: [${baseLower}, ${baseUpper}]`);
   }
 
-  // --- 4. whitelist = UniProxy -------------------------------------------
-  console.log("\n[4] deposit path");
+  // --- 5. whitelist = UniProxy -------------------------------------------
+  console.log("\n[5] deposit path");
   const whitelisted = await vault.whitelistedAddress();
   if (same(whitelisted, g.uniProxy)) {
     console.log(`    whitelist already UniProxy ${g.uniProxy}`);
@@ -179,12 +269,12 @@ async function main() {
   }
 
   if (skipOwnership) {
-    console.log("\n[5-7] SKIP_OWNERSHIP=true — every owner role left with the deploy key");
+    console.log("\n[6-8] SKIP_OWNERSHIP=true — every owner role left with the deploy key");
     return;
   }
 
-  // --- 5. vault owner = Admin --------------------------------------------
-  console.log("\n[5] vault ownership");
+  // --- 6. vault owner = Admin --------------------------------------------
+  console.log("\n[6] vault ownership");
   const currentOwner = await vault.owner();
   if (same(currentOwner, g.admin)) {
     console.log("    vault already owned by Admin");
@@ -194,8 +284,8 @@ async function main() {
     throw new Error(`vault owned by ${currentOwner}, not this key — cannot transfer`);
   }
 
-  // --- 6. peripheral owners = governance ---------------------------------
-  console.log("\n[6] peripheral ownership -> governance");
+  // --- 7. peripheral owners = governance ---------------------------------
+  console.log("\n[7] peripheral ownership -> governance");
   const transfers = [
     ["ClearingV2", () => clearing.owner(), async () => clearing.transferOwnership(governance, await overrides())],
     ["UniProxy", () => uniProxy.owner(), async () => uniProxy.transferOwnership(governance, await overrides())],
@@ -213,8 +303,8 @@ async function main() {
     }
   }
 
-  // --- 7. Admin.admin = governance (LAST) --------------------------------
-  console.log("\n[7] Admin");
+  // --- 8. Admin.admin = governance (LAST) --------------------------------
+  console.log("\n[8] Admin");
   const finalAdmin = await admin.admin();
   if (same(finalAdmin, governance)) {
     console.log("    Admin already held by governance");

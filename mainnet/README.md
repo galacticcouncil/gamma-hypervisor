@@ -32,6 +32,48 @@ cp .env.example .env.mainnet
 ENV_FILE=.env.mainnet npm run all
 ```
 
+### Fix the pool price BEFORE the handover
+
+`03-handover.js` centres the launch band on the pool's **current** tick, and it
+refuses to run when that tick is more than `ANCHOR_MAX_DEV_TICKS` (200, ~2%)
+from `PRICE_FEED_A`. Step 3 is read-only — it never moves a price itself.
+
+An empty pool's price is frozen at whatever `initialize()` set: with no
+liquidity there is no arbitrage to drag it back, so the gap only widens. Placing
+a band on a stale price is unrecoverable in practice — `RebalanceProxy.customDiff`
+caps the keeper at 500 ticks, so after step 8 correcting it takes a referendum —
+and the first real liquidity is arbitraged for the whole gap (~320 bps at a 10%
+gap).
+
+Correcting it is **`11-anchor-price.js`**, a separate one-off:
+
+```bash
+cp .env.anchor.example .env.anchor    # fill ANCHOR_PK
+ENV_FILE=.env.anchor node 11-anchor-price.js --dry-run
+ENV_FILE=.env.anchor node 11-anchor-price.js
+```
+
+It mints a tiny position, swaps once with `sqrtPriceLimitX96` set to the feed
+price, and burns the position. Both tokens come back; the cost is gas.
+
+Deliberately not part of the handover, for two reasons: it needs token inventory
+the deploy key does not have (so whoever holds a little aDOT and HOLLAR can run
+it — Ben, not the launch operator), and a script that hands over ownership
+should not also move a market price as a side effect.
+
+**Why not "just swap through SwapRouter02".** It reverts. Uniswap's router
+callback opens with `require(amount0Delta > 0 || amount1Delta > 0)` —
+*"swaps entirely within 0-liquidity regions are not supported"* — and an empty
+pool's deltas are both zero. `pool.swap()` from an EOA fails too: the pool calls
+back into `msg.sender`, and an EOA has no code. Minting the sliver of liquidity
+first is what makes the deltas non-zero and satisfies the router; the swap then
+rides free through the empty ticks to the limit.
+
+**After anchoring, deposits are blocked for ~50-60 min.** Spot has jumped away
+from the pool's hourly average and ClearingV2 rejects deposits until they
+reconverge. The handover is unaffected and can run immediately — it prints
+whether deposits would clear yet. Only the first *deposit* has to wait.
+
 `npm run all` stops with the vault live, empty and capped. Then:
 
 1. **Start the keeper** (`../keeper`, `ENTRYPOINT=proxy`). It keeps the band
