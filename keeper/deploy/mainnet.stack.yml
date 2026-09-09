@@ -20,13 +20,12 @@
 # See note-gamma-adot-hollar-alm-spec §C.1 for what it can still cost you.
 services:
   keeper:
-    # Pinned by digest as well as tag: a tag can be overwritten, a digest cannot.
-    # Resolves to linux/amd64 sha256:57f30dad446e9a7910794a7ff21b6ede3d115cb90ce6f2afca3866783ae3c1b6
-    # (138,485,385 B), pushed 2026-09-08. A `latest` tag also exists in the org and
-    # carries the SAME amd64 image — do not use it here: Swarmpit autoredeploy plus
-    # a moving tag gives a stop-first restart roughly every 60s that still reads as
-    # healthy, which is the worst failure mode for a keeper. Keep autoredeploy OFF.
-    image: galacticcouncil/gamma-keeper:18e153a@sha256:cc4491fa16160ef1a6d89cb56c41198dae00e74dfbaa1e1ac12a37f1f2ba0bfd
+    # Commit-tagged, never :latest — Swarmpit autoredeploy plus a moving tag gives
+    # a stop-first restart roughly every 60s that still reads as healthy, the worst
+    # failure mode for a keeper. Keep autoredeploy OFF. Append @sha256:<digest>
+    # after pushing if you want it immutable.
+    # 6a84e59 is the first build with the gas-price fix; 18e153a overpays 276x.
+    image: galacticcouncil/gamma-keeper:6a84e59
     environment:
       # --- signer ---
       PRIVATE_KEY: '0x<64 hex — the keeper key for 0x0B0bE14C1158Ba09B720812e70F819366614Cb96>'
