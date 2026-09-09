@@ -163,6 +163,64 @@ function priceE18FromSqrtPriceX96(sqrtPriceX96, dec0, dec1) {
   return (rawE18 * 10n ** BigInt(dec0)) / 10n ** BigInt(dec1);
 }
 
+/**
+ * The inverse: human token1-per-token0 (1e18) -> sqrtPriceX96, decimals-aware.
+ *
+ *     sqrtPriceX96 = sqrt(price_raw) * 2^96 = sqrt(price_raw * 2^192)
+ *     price_raw    = priceE18 / 1e18 * 10^(dec1 - dec0)
+ *
+ * Kept in integers end to end: the result is used as a swap's `sqrtPriceLimitX96`,
+ * and a float round trip there lands the pool a tick or two off the intended price.
+ */
+function sqrtPriceX96FromPriceE18(priceE18, dec0, dec1) {
+  if (priceE18 <= 0n) throw new Error(`price must be positive, got ${priceE18}`);
+  const shift = Number(dec1) - Number(dec0);
+  let num = priceE18 << 192n;
+  let den = 10n ** 18n;
+  if (shift >= 0) num *= 10n ** BigInt(shift);
+  else den *= 10n ** BigInt(-shift);
+  return isqrt(num / den);
+}
+
+/** Uniswap v3's hard price bounds — a swap limit outside these reverts. */
+const MIN_SQRT_RATIO = 4295128739n;
+const MAX_SQRT_RATIO = 1461446703485210103287273052203988822378723970342n;
+
+/**
+ * The feed's view of token1-per-token0, as 1e18.
+ *
+ * `PRICE_FEED_A` prices token0 in USD. `PRICE_FEED_B` prices token1 the same
+ * way and the ratio is used; left blank, token1 is taken as the USD-pegged side
+ * (HOLLAR), which is the aDOT/HOLLAR case. `00-preflight.js` carries the same
+ * logic inline for its divergence note — keep the two in step.
+ *
+ * Throws when the feed is missing or stale: every caller uses this to decide
+ * whether to move real money, so an absent answer must never read as agreement.
+ */
+async function resolveOraclePriceE18(ethers, provider, staleSeconds) {
+  const feedA = env("PRICE_FEED_A");
+  if (!feedA || !require("ethers").isAddress(feedA)) {
+    throw new Error(`PRICE_FEED_A is unset or not an address (${feedA ?? "unset"})`);
+  }
+  const a = await readFeedE18(ethers, feedA, provider, staleSeconds);
+  const feedB = env("PRICE_FEED_B");
+  if (!feedB) return { priceE18: a.priceE18, age: a.age };
+  const b = await readFeedE18(ethers, feedB, provider, staleSeconds);
+  return { priceE18: (a.priceE18 * 10n ** 18n) / b.priceE18, age: Math.max(a.age, b.age) };
+}
+
+/**
+ * Signed tick distance from `fromSqrt` to `toSqrt`.
+ *
+ * Floating point is acceptable here and nowhere else: this feeds log lines and
+ * the deviation thresholds, never a transaction. Taking the ratio of two similar
+ * magnitudes keeps it well inside double precision.
+ */
+function tickDeltaBetweenSqrt(fromSqrt, toSqrt) {
+  const ratio = Number(toSqrt) / Number(fromSqrt);
+  return Math.round((2 * Math.log(ratio)) / Math.log(1.0001));
+}
+
 const fmtE18 = (x) => {
   const s = (x / 10n ** 12n).toString().padStart(7, "0");
   return `${s.slice(0, -6)}.${s.slice(-6)}`;
@@ -478,11 +536,16 @@ module.exports = {
   isqrt,
   parsePriceToE18,
   priceE18FromSqrtPriceX96,
+  sqrtPriceX96FromPriceE18,
+  tickDeltaBetweenSqrt,
+  MIN_SQRT_RATIO,
+  MAX_SQRT_RATIO,
   firstDepositShares,
   fmtE18,
   fmtUnits,
   ABI,
   readFeedE18,
+  resolveOraclePriceE18,
   gasOverrides,
   waitForSuccess,
   loadArtifact,

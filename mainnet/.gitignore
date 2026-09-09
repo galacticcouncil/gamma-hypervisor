@@ -3,5 +3,6 @@
 # mainnet command at another chain.
 .env*
 !.env.example
+!.env.anchor.example
 node_modules/
 deployments/
