@@ -99,7 +99,7 @@ services:
       # Off until the vault is seeded: compounding an empty vault reverts and
       # logs a failed sweep every interval. Flip to true after the seed.
       COMPOUND_ENABLED: 'false'
-      COMPOUND_INTERVAL_SECS: '300'
+      COMPOUND_INTERVAL_SECS: '3600'
 
       # --- operational ---
       # Minimum WETH (asset 20) balance to act; below it the keeper skips and
@@ -153,6 +153,56 @@ services:
         limits:
           cpus: '0.5'
           memory: 256M
+  # Watchdog. A SIBLING of the keeper on purpose: the failure that matters most
+  # is the keeper not running at all, and a health check inside that process
+  # cannot report it. Every signal is read from chain, so it holds whether the
+  # keeper is healthy, crashed or deleted.
+  monitor:
+    image: galacticcouncil/gamma-monitor:0.1.0
+    environment:
+      RPC_URL: https://hdx.tarn.hydration.cloud
+      KEEPER: '0x0B0bE14C1158Ba09B720812e70F819366614Cb96'
+      VAULT: '0xa206D0959813f17c17C87147271C49065438648A'
+      POOL: '0x5C6208A3c316A801f8996750aA7b6f45Fc988548'
+      CLEARING: '0x3541A3E5Db2d611904BE4F45A3CAFEA9A4df3e48'
+      PRICE_FEED: '0xFBCa0A6dC5B74C042DF23025D99ef0F1fcAC6702'
+      # Leave unset to log only; set it to actually alert.
+      DISCORD_WEBHOOK: ''
+      CHECK_INTERVAL_SECS: '300'
+      REALERT_SECS: '21600'
+      # Warn ABOVE the keeper's own floor, so there is time to act before it
+      # stops. Measured costs: compound 643k gas ~0.0000039 WETH, rebalance
+      # 815k ~0.0000049 — so 0.002 is weeks of runway, not hours.
+      GAS_WARN_WEI: '2000000000000000'
+      GAS_FLOOR_WEI: '1000000000000000'
+      # At COMPOUND_INTERVAL_SECS=3600 a transaction is expected roughly hourly;
+      # 4h of no nonce movement means wedged, crashed, or unable to price a tx.
+      STALL_MINUTES: '240'
+      DIVERGENCE_BPS: '200'
+      STALE_SECONDS: '28800'
+    networks:
+      - default
+    logging:
+      driver: json-file
+      options:
+        max-file: '5'
+        max-size: 10m
+    deploy:
+      mode: replicated
+      replicas: 1
+      labels:
+        com.hydration.role: gamma-monitor
+      restart_policy:
+        condition: any
+        delay: 15s
+        window: 60s
+      resources:
+        reservations:
+          cpus: '0.02'
+          memory: 32M
+        limits:
+          cpus: '0.2'
+          memory: 128M
 networks:
   default:
     driver: overlay
