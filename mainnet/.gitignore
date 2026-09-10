@@ -5,4 +5,7 @@
 !.env.example
 !.env.anchor.example
 node_modules/
-deployments/
+# Deployment records are the launch archive — the addresses are nonce-derived
+# and exist nowhere else. Keep the JSON, keep everything else out.
+deployments/*
+!deployments/*.json

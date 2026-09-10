@@ -1,0 +1,49 @@
+{
+  "network": {
+    "name": "mainnet",
+    "chainId": "222222",
+    "evmRpc": "https://rpc.hydradx.cloud",
+    "substrateWs": "wss://rpc.hydradx.cloud"
+  },
+  "deployer": "0x71FeB8b2849101a6E62e3369eaAfDc6154CD0Bc0",
+  "governance": "0xAa7e0000000000000000000000000000000Aa7e0",
+  "keeper": "0x0B0bE14C1158Ba09B720812e70F819366614Cb96",
+  "feeRecipient": "0x6d6f646c70792f74727372790000000000000000",
+  "uniswap": {
+    "v3Factory": "0x776c4Fd6A6170165a91bA45Dec40a14bcc8eC354",
+    "pool": "0x5C6208A3c316A801f8996750aA7b6f45Fc988548",
+    "fee": 3000,
+    "token0": "0x02639ec01313c8775Fae74F2dad1118c8A8a86dA",
+    "token1": "0x531a654d1696ED52e7275A8cede955E82620f99a"
+  },
+  "gamma": {
+    "hypervisorFactory": "0x1d652D8333F412c5e86360D3adc43E3F3C93E603",
+    "hypervisor": "0xa206D0959813f17c17C87147271C49065438648A",
+    "clearing": "0x3541A3E5Db2d611904BE4F45A3CAFEA9A4df3e48",
+    "uniProxy": "0x20aA5d9ffF339c3f1ACaee792aa05c53cEb3F741",
+    "admin": "0x8fc8a0d7cb9c6B2366Ec08f1Bf03067D54b67bc5",
+    "rebalanceProxy": "0x8B7Dd119b7edb85D9cF166129DBec5D88DC78C94"
+  },
+  "config": {
+    "twapInterval": 3600,
+    "priceThreshold": 10100,
+    "depositDelta": "10010",
+    "maxTotalSupply": "150000000000000000000000",
+    "deposit0Max": "458429590940617",
+    "deposit1Max": "50000000000000000000000",
+    "hypervisorFee": 255,
+    "maxTranslation": 500,
+    "maxWidth": 300,
+    "minInterval": 21600,
+    "baseHalfWidthMult": 16,
+    "limitWidthMult": 1,
+    "posture": "production"
+  },
+  "roles": {
+    "ADMIN_ADMIN": "0xAa7e0000000000000000000000000000000Aa7e0",
+    "CLEARING_OWNER": "0xAA7e0000000000000000000000000000000AA7E1",
+    "UNIPROXY_OWNER": "0xAa7e0000000000000000000000000000000Aa7e0",
+    "REBALANCEPROXY_OWNER": "0xAa7e0000000000000000000000000000000Aa7e0",
+    "FACTORY_OWNER": "0xAa7e0000000000000000000000000000000Aa7e0"
+  }
+}
