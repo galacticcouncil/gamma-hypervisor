@@ -8,6 +8,10 @@ node_modules
 !/scripts/**
 !/tasks/**
 !/test/**
+!/zombienet/**
+!/keeper/**
+!/lark/**
+!/mainnet/**
 !/.gitignore
 !/.env.example
 !/hardhat.config.ts
@@ -16,3 +20,9 @@ node_modules
 !/yarn.lock
 !/README.md
 !/tsconfig.json
+
+# never, even inside the un-ignored dirs above
+.DS_Store
+**/.DS_Store
+**/node_modules/
+**/.env

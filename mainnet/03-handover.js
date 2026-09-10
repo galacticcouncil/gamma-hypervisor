@@ -1,0 +1,359 @@
+/**
+ * 03-handover.js — move the deployed vault from the BOOTSTRAP posture to the
+ * PRODUCTION posture, in one deliberate, ordered, one-way pass:
+ *
+ *   1. verify the Model B wiring is complete   (else the vault becomes unrebalanceable)
+ *   2. verify the ClearingV2 guards match the config (last chance without a referendum)
+ *   3. check the pool price against the feed  (READ-ONLY gate; see below)
+ *   4. set the launch band                     (owner action, vault must still be empty)
+ *   5. whitelist = UniProxy                    (every deposit now passes ClearingV2)
+ *   6. vault owner = Admin                     (keeper reaches rebalance only through the proxy caps)
+ *   7. ClearingV2, UniProxy, RebalanceProxy, HypervisorFactory owner = governance
+ *   8. Admin.admin = governance                LAST — it retires this key entirely
+ *
+ * Step 7 is the one a port of the testnet script forgets. Leaving those four
+ * with the deploy key keeps the entire Model B story theoretical: that key could
+ * `UniProxy.transferClearance` to a clearing contract with no TWAP or ratio
+ * guard at all, or `RebalanceProxy.exemptHypervisor` to drop every cap.
+ *
+ * Step 3 is READ-ONLY and it is a gate, not an action. An empty pool's price is
+ * frozen at whatever `initialize()` set, and the launch band in step 4 is
+ * centred on it — so a stale price here becomes a band the keeper is not
+ * allowed to move (RebalanceProxy's `customDiff`) and a seed that gets
+ * arbitraged for the whole gap. Correcting it is `11-anchor-price.js`, a
+ * separate one-off run by whoever holds a little of both tokens. This script
+ * refuses to proceed on a bad price rather than moving a market itself.
+ *
+ * Idempotent: every step reads current state first, so it is safe to re-run.
+ * SKIP_OWNERSHIP=true stops after step 5 (testnets only).
+ * SKIP_PRICE_CHECK=true bypasses step 3 — a chain with no feed, or a pool whose
+ * current price you have decided is the right one.
+ */
+
+const path = require("path");
+const { ethers } = require("ethers");
+const {
+  env,
+  requireEnv,
+  isMainnet,
+  centeredBand,
+  limitRange,
+  gasOverrides,
+  waitForSuccess,
+  loadDeployments,
+  saveJson,
+  resolveOraclePriceE18,
+  priceE18FromSqrtPriceX96,
+  sqrtPriceX96FromPriceE18,
+  tickDeltaBetweenSqrt,
+  fmtE18,
+  ABI,
+} = require("./lib");
+
+const same = (a, b) => String(a).toLowerCase() === String(b).toLowerCase();
+
+async function main() {
+  const net = env("NET", "mainnet");
+  const d = loadDeployments(net);
+  const provider = new ethers.JsonRpcProvider(env("EVM_RPC_URL", d.network.evmRpc));
+  const wallet = new ethers.Wallet(requireEnv("DEPLOYER_PK"), provider);
+  const confirmations = Number(env("CONFIRMATIONS", "2"));
+  const skipOwnership = env("SKIP_OWNERSHIP", "false") === "true";
+  const governance = env("GOVERNANCE_ADDRESS", d.governance);
+  // Per-role owner targets. Unset => GOVERNANCE_ADDRESS, so an unconfigured run
+  // reproduces the single-address behaviour exactly.
+  //
+  // Why this exists: every Gamma lever is plain `onlyOwner`, so there is no
+  // narrow "emergency" capability to delegate — the only granularity available
+  // is WHICH CONTRACT a role sits on. Putting ClearingV2 on the Technical
+  // Committee's dispatch identity (0xaa7e…aa7e1, `dispatchAsEmergencyAdmin`,
+  // origin Root|TechCommitteeMajority) makes `pause(true)` a TC motion instead
+  // of a ~7-day track-9 referendum. It also hands the TC the deposit perimeter
+  // — setTwapCheck / appendList / setDepositOverride — so it is a trust
+  // decision, not a free win. Root still reaches all of these, so governance
+  // keeps full access; only the cheap track changes.
+  const roleTarget = (name) => {
+    const v = env(name, governance);
+    if (!ethers.isAddress(v || "")) throw new Error(`${name} is not an address: ${v}`);
+    if (same(v, wallet.address)) throw new Error(`${name} is the deploy key — that is not a handover`);
+    return ethers.getAddress(v);
+  };
+  const keeper = env("KEEPER_ADDRESS", d.keeper);
+  const feeRecipient = env("FEE_RECIPIENT", d.feeRecipient || "");
+  if (!ethers.isAddress(governance || "")) throw new Error("GOVERNANCE_ADDRESS is required");
+  if (!ethers.isAddress(feeRecipient || "")) {
+    throw new Error("FEE_RECIPIENT is required — rebalance() reverts on address(0) and it is stored by that call");
+  }
+  if (isMainnet() && skipOwnership) throw new Error("SKIP_OWNERSHIP is a testnet-only escape hatch");
+
+  const g = d.gamma;
+  const vault = new ethers.Contract(g.hypervisor, ABI.hypervisor, wallet);
+  const clearing = new ethers.Contract(g.clearing, ABI.clearing, wallet);
+  const uniProxy = new ethers.Contract(g.uniProxy, ABI.uniProxy, wallet);
+  const admin = new ethers.Contract(g.admin, ABI.admin, wallet);
+  const proxy = new ethers.Contract(g.rebalanceProxy, ABI.rebalanceProxy, wallet);
+  const hyperFactory = new ethers.Contract(g.hypervisorFactory, ABI.hypervisorFactory, wallet);
+  const pool = new ethers.Contract(d.uniswap.pool, ABI.pool, provider);
+
+  const overrides = () => gasOverrides(provider);
+  const send = async (txPromise, label) => waitForSuccess(await txPromise, confirmations, label);
+
+  console.log(`=== Gamma handover: ${net} ===`);
+  console.log(`  signer     ${wallet.address}`);
+  console.log(`  governance ${governance}`);
+  console.log(`  vault      ${g.hypervisor}\n`);
+
+  // --- 1. Model B wiring --------------------------------------------------
+  console.log("[1] Model B wiring");
+  const [proxyAdmin, proxyRebalancer, adminRebalancer, adminAdvisor, adminOwner] = await Promise.all([
+    proxy.admins(g.hypervisor),
+    proxy.rebalancers(g.hypervisor),
+    admin.rebalancers(g.hypervisor),
+    admin.advisors(g.hypervisor),
+    admin.admin(),
+  ]);
+  console.log(`    proxy.admin       ${proxyAdmin}`);
+  console.log(`    proxy.rebalancer  ${proxyRebalancer}`);
+  console.log(`    admin.rebalancer  ${adminRebalancer}`);
+  console.log(`    admin.advisor     ${adminAdvisor}`);
+  console.log(`    admin.admin       ${adminOwner}`);
+  const wiringProblems = [];
+  if (!same(proxyAdmin, g.admin)) wiringProblems.push(`proxy.admins[vault] is ${proxyAdmin}, expected ${g.admin}`);
+  if (!same(adminRebalancer, g.rebalanceProxy)) wiringProblems.push(`admin.rebalancers[vault] is ${adminRebalancer}, expected ${g.rebalanceProxy}`);
+  if (proxyRebalancer === ethers.ZeroAddress) wiringProblems.push("proxy.rebalancers[vault] is unset — nothing could ever rebalance");
+  if (!same(proxyRebalancer, keeper)) wiringProblems.push(`proxy.rebalancers[vault] is ${proxyRebalancer}, expected keeper ${keeper}`);
+  if (adminAdvisor === ethers.ZeroAddress) wiringProblems.push("admin.advisors[vault] is unset — compound would be unreachable forever");
+  if (wiringProblems.length) {
+    throw new Error(
+      "refusing to hand over an incompletely wired vault — it would be unrebalanceable:\n    " + wiringProblems.join("\n    ")
+    );
+  }
+  const caps = await Promise.all([proxy.customDiff(g.hypervisor), proxy.customWidth(g.hypervisor), proxy.customInterval(g.hypervisor)]);
+  console.log(`    caps: maxTranslation=${caps[0]} maxWidth=${caps[1]} minInterval=${caps[2]}s`);
+  if (caps.some((c) => c === 0n)) throw new Error("a proxy cap is 0, which falls back to the shared global default — set all three");
+  console.log("    wiring complete");
+
+  // --- 2. ClearingV2 guards ----------------------------------------------
+  // After step 7 only a referendum can change these, so this is the last cheap
+  // chance to notice a mismatch with the reviewed configuration.
+  console.log("\n[2] ClearingV2 guards");
+  const [twapCheck, twapInterval, priceThreshold, position, clearingOwner] = await Promise.all([
+    clearing.twapCheck(),
+    clearing.twapInterval(),
+    clearing.priceThreshold(),
+    clearing.positions(g.hypervisor),
+    clearing.owner(),
+  ]);
+  console.log(`    twapCheck=${twapCheck} interval=${twapInterval}s threshold=${priceThreshold}`);
+  console.log(`    caps: supply=${position.maxTotalSupply} d0=${position.deposit0Max} d1=${position.deposit1Max} delta=${position.customDepositDelta} override=${position.depositOverride}`);
+  const guardProblems = [];
+  if (!twapCheck) guardProblems.push("twapCheck is off — deposits would skip the deviation guard entirely");
+  if (Number(position.version) === 0) guardProblems.push("the vault is not an added ClearingV2 position — every deposit reverts with 'not added'");
+  if (Number(priceThreshold) <= 10_000) guardProblems.push(`priceThreshold ${priceThreshold} allows 0% deviation — every deposit reverts`);
+  if (Number(twapInterval) !== Number(env("TWAP_INTERVAL", String(d.config.twapInterval)))) {
+    guardProblems.push(`twapInterval ${twapInterval} does not match the configured ${env("TWAP_INTERVAL", String(d.config.twapInterval))}`);
+  }
+  // applyRatio divides by customDepositDelta whenever depositOverride is on.
+  if (position.depositOverride && position.customDepositDelta === 0n) {
+    guardProblems.push("depositOverride is on with customDepositDelta = 0 — every deposit AFTER the first reverts in FullMath.mulDiv");
+  }
+  if (isMainnet() && position.maxTotalSupply === 0n) guardProblems.push("maxTotalSupply is 0 (uncapped) — a mainnet guarded launch needs a cap");
+  if (guardProblems.length) {
+    throw new Error("ClearingV2 is not launch-ready:\n    " + guardProblems.join("\n    "));
+  }
+  if (!same(clearingOwner, wallet.address) && !same(clearingOwner, roleTarget("CLEARING_OWNER"))) {
+    throw new Error(`ClearingV2 owner is ${clearingOwner} — neither this key nor CLEARING_OWNER`);
+  }
+  console.log("    guards are launch-ready");
+
+  // --- 3. pool price sanity -----------------------------------------------
+  //
+  // Read-only. This step moves nothing; it refuses to proceed on a price that
+  // would poison everything after it.
+  //
+  // An empty pool cannot be arbitraged, so its price is frozen at whatever
+  // `initialize()` set and drifts further from the market every day. Step 4
+  // centres the launch band on that price, and RebalanceProxy's `customDiff`
+  // caps how far the keeper may later move the band — so a band placed on a
+  // stale price cannot be walked back without a referendum, and the first real
+  // liquidity is arbitraged for the whole gap.
+  //
+  // Correcting the price is `11-anchor-price.js`, run BEFORE this script by
+  // whoever holds a little of both tokens. Deliberately a separate, one-off
+  // job: it needs token inventory this key does not have, and the handover
+  // should never move a market price as a side effect.
+  console.log("\n[3] pool price");
+  const maxDevTicks = Number(env("ANCHOR_MAX_DEV_TICKS", "200"));
+  if (!Number.isInteger(maxDevTicks) || maxDevTicks < 1) {
+    throw new Error("ANCHOR_MAX_DEV_TICKS must be a positive integer");
+  }
+
+  if (env("SKIP_PRICE_CHECK", "false") === "true") {
+    console.log(`    ${isMainnet() ? "\u26a0 " : ""}SKIP_PRICE_CHECK=true — the band will sit on the pool's current price, unchecked`);
+  } else {
+    const token0 = new ethers.Contract(d.uniswap.token0, ABI.erc20, provider);
+    const token1 = new ethers.Contract(d.uniswap.token1, ABI.erc20, provider);
+    const [slot0, dec0, dec1] = await Promise.all([pool.slot0(), token0.decimals(), token1.decimals()]);
+    // A feed that is missing or stale must not silently pass this gate — but it
+    // must not dead-end the handover either. `00-preflight.js` treats an absent
+    // PRICE_FEED_A as a note, so an operator can reach this point without one,
+    // and DIA's measured max age (7.4h) sits close to the 8h default.
+    let oracle;
+    try {
+      oracle = await resolveOraclePriceE18(ethers, provider, Number(env("STALE_SECONDS", "28800")));
+    } catch (error) {
+      throw new Error(
+        `cannot read the price feed, so the pool price cannot be checked: ${error.message}\n` +
+          `    Set PRICE_FEED_A (mainnet DOT/USD is 0xFBCa0A6dC5B74C042DF23025D99ef0F1fcAC6702),\n` +
+          `    raise STALE_SECONDS if the feed is merely old, or set SKIP_PRICE_CHECK=true to\n` +
+          `    hand over onto the pool's current price without checking it.`
+      );
+    }
+    const poolE18 = priceE18FromSqrtPriceX96(slot0.sqrtPriceX96, Number(dec0), Number(dec1));
+    const targetSqrt = sqrtPriceX96FromPriceE18(oracle.priceE18, Number(dec0), Number(dec1));
+    const devTicks = tickDeltaBetweenSqrt(slot0.sqrtPriceX96, targetSqrt);
+
+    console.log(`    pool   ${fmtE18(poolE18)}  tick ${slot0.tick}`);
+    console.log(`    feed   ${fmtE18(oracle.priceE18)}  (age ${oracle.age}s)`);
+    console.log(`    off by ${devTicks} ticks (tolerance ${maxDevTicks})`);
+    if (Math.abs(devTicks) > maxDevTicks) {
+      throw new Error(
+        `the pool is ${devTicks} ticks from the feed — too far to place a launch band on.\n` +
+          `    Run 11-anchor-price.js first (it needs a little of both tokens, and returns them),\n` +
+          `    then re-run this. Or set SKIP_PRICE_CHECK=true to accept the band being placed here.`
+      );
+    }
+    console.log("    price is close enough to place a band on");
+
+    // Not a gate — the handover does not deposit. But an operator who has just
+    // anchored will otherwise hand over a live vault and be surprised when the
+    // first deposit reverts, so say it here rather than let them find out.
+    try {
+      await clearing.checkPriceChange(g.hypervisor, twapInterval, priceThreshold);
+      console.log("    deposits will clear: spot agrees with the pool's hourly average");
+    } catch {
+      console.log(
+        `    ! deposits will REVERT for now — spot is still more than the ${priceThreshold} threshold\n` +
+          `      away from the ${twapInterval}s average (normal right after an anchor; it settles in ~50-60 min).\n` +
+          `      The handover itself is unaffected.`
+      );
+    }
+  }
+
+  // --- 4. launch band -----------------------------------------------------
+  console.log("\n[4] launch band");
+  const spacing = Number(await vault.tickSpacing());
+  const [baseLower, baseUpper, total] = await Promise.all([vault.baseLower(), vault.baseUpper(), vault.getTotalAmounts()]);
+  const owner = await vault.owner();
+  if (Number(baseLower) === Number(baseUpper)) {
+    if (!same(owner, wallet.address)) throw new Error(`vault has no band and this key is not the owner (${owner})`);
+    // The bootstrap rebalance passes zero slippage mins. That is only safe
+    // because there is nothing to deploy: with liquidity present it would mint
+    // real positions completely unprotected.
+    if (total.total0 !== 0n || total.total1 !== 0n) {
+      if (env("ACCEPT_ZERO_MINS", "false") !== "true") {
+        throw new Error(
+          `vault already holds ${total.total0}/${total.total1} but has no band. Setting one now would deploy ` +
+            `that liquidity with zero slippage protection. Run the handover BEFORE the seed, or set ACCEPT_ZERO_MINS=true.`
+        );
+      }
+      console.log("    ⚠ ACCEPT_ZERO_MINS — deploying existing liquidity with no slippage bounds");
+    }
+    const { tick } = await pool.slot0();
+    const mult = Number(env("BASE_HALF_WIDTH_MULT", String(d.config.baseHalfWidthMult)));
+    const limitMult = Number(env("LIMIT_WIDTH_MULT", String(d.config.limitWidthMult)));
+    const side = env("LIMIT_SIDE", "above");
+    const [lower, upper] = centeredBand(Number(tick), mult, spacing);
+    const [limitLower, limitUpper] = limitRange(Number(tick), spacing, side, limitMult);
+    console.log(`    tick ${tick}: base [${lower}, ${upper}] width ${upper - lower}, limit [${limitLower}, ${limitUpper}] (${side})`);
+    const zeros = [0, 0, 0, 0];
+    await send(
+      vault.rebalance(lower, upper, limitLower, limitUpper, feeRecipient, zeros, zeros, await overrides()),
+      `hypervisor.rebalance -> launch band, feeRecipient ${feeRecipient}`
+    );
+  } else {
+    console.log(`    band already set: [${baseLower}, ${baseUpper}]`);
+  }
+
+  // --- 5. whitelist = UniProxy -------------------------------------------
+  console.log("\n[5] deposit path");
+  const whitelisted = await vault.whitelistedAddress();
+  if (same(whitelisted, g.uniProxy)) {
+    console.log(`    whitelist already UniProxy ${g.uniProxy}`);
+  } else if (same(await vault.owner(), wallet.address)) {
+    await send(vault.setWhitelist(g.uniProxy, await overrides()), `hypervisor.setWhitelist(${g.uniProxy})`);
+  } else {
+    throw new Error(`whitelist is ${whitelisted}, not UniProxy, and this key no longer owns the vault`);
+  }
+
+  if (skipOwnership) {
+    console.log("\n[6-8] SKIP_OWNERSHIP=true — every owner role left with the deploy key");
+    return;
+  }
+
+  // --- 6. vault owner = Admin --------------------------------------------
+  console.log("\n[6] vault ownership");
+  const currentOwner = await vault.owner();
+  if (same(currentOwner, g.admin)) {
+    console.log("    vault already owned by Admin");
+  } else if (same(currentOwner, wallet.address)) {
+    await send(vault.transferOwnership(g.admin, await overrides()), `hypervisor.transferOwnership(${g.admin})`);
+  } else {
+    throw new Error(`vault owned by ${currentOwner}, not this key — cannot transfer`);
+  }
+
+  // --- 7. peripheral owners = governance ---------------------------------
+  console.log("\n[7] peripheral ownership -> governance");
+  const transfers = [
+    ["ClearingV2", roleTarget("CLEARING_OWNER"), () => clearing.owner(), async (t) => clearing.transferOwnership(t, await overrides())],
+    ["UniProxy", roleTarget("UNIPROXY_OWNER"), () => uniProxy.owner(), async (t) => uniProxy.transferOwnership(t, await overrides())],
+    ["RebalanceProxy", roleTarget("REBALANCEPROXY_OWNER"), () => proxy.owner(), async (t) => proxy.transferOwner(t, await overrides())],
+    ["HypervisorFactory", roleTarget("FACTORY_OWNER"), () => hyperFactory.owner(), async (t) => hyperFactory.transferOwnership(t, await overrides())],
+  ];
+  for (const [label, target, read, write] of transfers) {
+    const current = await read();
+    const note = same(target, governance) ? "" : "  (NOT the default governance address)";
+    if (same(current, target)) {
+      console.log(`    ${label} already owned by ${target}${note}`);
+    } else if (same(current, wallet.address)) {
+      await send(write(target), `${label}.transferOwnership(${target})${note}`);
+    } else {
+      throw new Error(`${label} owner is ${current} — neither this key nor its configured target ${target}`);
+    }
+  }
+
+  // --- 8. Admin.admin = governance (LAST) --------------------------------
+  console.log("\n[8] Admin");
+  const finalAdmin = await admin.admin();
+  if (same(finalAdmin, governance)) {
+    console.log("    Admin already held by governance");
+  } else if (same(finalAdmin, wallet.address)) {
+    await send(admin.transferAdmin(roleTarget("ADMIN_ADMIN"), await overrides()), `admin.transferAdmin(${roleTarget("ADMIN_ADMIN")}) — this key is now retired`);
+  } else {
+    throw new Error(`Admin.admin is ${finalAdmin}, not this key — cannot transfer`);
+  }
+
+  d.config = { ...(d.config || {}), posture: "production" };
+  // Record where each role actually went, so 04-verify.js checks the real split
+  // instead of assuming one governance address for all five.
+  d.roles = {
+    ADMIN_ADMIN: roleTarget("ADMIN_ADMIN"),
+    CLEARING_OWNER: roleTarget("CLEARING_OWNER"),
+    UNIPROXY_OWNER: roleTarget("UNIPROXY_OWNER"),
+    REBALANCEPROXY_OWNER: roleTarget("REBALANCEPROXY_OWNER"),
+    FACTORY_OWNER: roleTarget("FACTORY_OWNER"),
+  };
+  const p = saveJson(path.join("deployments", `${net}.json`), d);
+  console.log(`\n  Wrote ${p}`);
+  console.log("\n=== PRODUCTION posture ===");
+  console.log(`  Keeper config: ENTRYPOINT=proxy REBALANCE_PROXY=${g.rebalanceProxy} VAULT=${g.hypervisor} ADMIN_ADDRESS=${g.admin}`);
+  console.log("  The vault is live, empty and capped. Seed it with:");
+  console.log(`    ENV_FILE=<file> npm run governance -- seed`);
+  console.log("  Start the keeper BEFORE the seed: it keeps the band centred on the tick, and");
+  console.log("  ClearingV2 rejects any deposit taken while the tick sits outside that band.");
+}
+
+main().catch((e) => {
+  console.error("\n  Handover FAILED:", e.message, "\n");
+  process.exit(1);
+});
