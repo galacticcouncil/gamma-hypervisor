@@ -10,6 +10,7 @@ node_modules
 !/test/**
 !/zombienet/**
 !/keeper/**
+!/monitor/**
 !/lark/**
 !/mainnet/**
 !/.gitignore
