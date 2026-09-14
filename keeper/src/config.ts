@@ -106,6 +106,19 @@ const Env = z
     // compounding does not move the band, and its cadence sets how often the
     // protocol fee actually reaches the recipient.
     COMPOUND_ENABLED: boolEnv(false),
+    /**
+     * Minimum fees, in token1 raw units, before a sweep is worth its gas.
+     *
+     * Fees accrue INSIDE the Uniswap position, not as the vault's balance, so
+     * the sweep is gated on `idle + accrued` rather than idle alone — gating on
+     * idle meant the compound could never see the fees it exists to collect,
+     * because the only thing that makes them idle is the compound itself.
+     *
+     * 0 sweeps whenever anything has accrued. A compound costs a few
+     * millionths of a WETH, so even small sweeps pay for themselves; the knob
+     * exists for chains where that stops being true.
+     */
+    COMPOUND_MIN_FEES1: z.string().regex(/^\d+$/).default('0'),
     // Small and frequent, deliberately. What an attacker can extract by sandwiching
     // a sweep scales with the pile it tips in, so a short interval keeps every
     // individual sweep under the threshold where attacking it beats the swap fee.
@@ -190,9 +203,16 @@ const Env = z
     }
   });
 
-export type Config = z.infer<typeof Env> & { gasFloorWei: ethers.BigNumber };
+export type Config = z.infer<typeof Env> & {
+  gasFloorWei: ethers.BigNumber;
+  compoundMinFees1: ethers.BigNumber;
+};
 
 export function loadConfig(): Config {
   const e = Env.parse(process.env);
-  return { ...e, gasFloorWei: ethers.BigNumber.from(e.GAS_FLOOR_WEI) };
+  return {
+    ...e,
+    gasFloorWei: ethers.BigNumber.from(e.GAS_FLOOR_WEI),
+    compoundMinFees1: ethers.BigNumber.from(e.COMPOUND_MIN_FEES1),
+  };
 }

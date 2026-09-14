@@ -21,6 +21,11 @@ export const POOL_ABI = [
   'function tickSpacing() view returns (int24)',
   'function observe(uint32[] secondsAgos) view returns (int56[] tickCumulatives, uint160[] secondsPerLiquidityCumulativeX128)',
   'function observations(uint256 index) view returns (uint32 blockTimestamp, int56 tickCumulative, uint160 secondsPerLiquidityCumulativeX128, bool initialized)',
+  // Fee accounting: uncollected fees live here, not in the vault's balance.
+  'function feeGrowthGlobal0X128() view returns (uint256)',
+  'function feeGrowthGlobal1X128() view returns (uint256)',
+  'function ticks(int24) view returns (uint128 liquidityGross, int128 liquidityNet, uint256 feeGrowthOutside0X128, uint256 feeGrowthOutside1X128, int56 tickCumulativeOutside, uint160 secondsPerLiquidityOutsideX128, uint32 secondsOutside, bool initialized)',
+  'function positions(bytes32) view returns (uint128 liquidity, uint256 feeGrowthInside0LastX128, uint256 feeGrowthInside1LastX128, uint128 tokensOwed0, uint128 tokensOwed1)',
 ];
 
 export const ERC20_ABI = [
