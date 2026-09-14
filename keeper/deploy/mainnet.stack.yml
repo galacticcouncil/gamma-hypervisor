@@ -158,7 +158,7 @@ services:
   # cannot report it. Every signal is read from chain, so it holds whether the
   # keeper is healthy, crashed or deleted.
   monitor:
-    image: galacticcouncil/gamma-monitor:0.1.0
+    image: galacticcouncil/gamma-monitor:0.2.0
     environment:
       RPC_URL: https://hdx.tarn.hydration.cloud
       KEEPER: '0x0B0bE14C1158Ba09B720812e70F819366614Cb96'
@@ -175,9 +175,16 @@ services:
       # 815k ~0.0000049 — so 0.002 is weeks of runway, not hours.
       GAS_WARN_WEI: '2000000000000000'
       GAS_FLOOR_WEI: '1000000000000000'
-      # At COMPOUND_INTERVAL_SECS=3600 a transaction is expected roughly hourly;
-      # 4h of no nonce movement means wedged, crashed, or unable to price a tx.
-      STALL_MINUTES: '240'
+      REBALANCE_PROXY: '0x8B7Dd119b7edb85D9cF166129DBec5D88DC78C94'
+      # Liveness is "work that was DUE and did not happen", never "no recent
+      # transactions" — a healthy keeper is silent for days. These must match
+      # the keeper's own values or the check disagrees with what it is watching.
+      REBALANCE_THRESHOLD_MULT: '11'
+      MIN_INTERVAL_SECS: '21600'
+      REBALANCE_GRACE_SECS: '7200'
+      # Above this pool-vs-oracle gap the keeper is RIGHT to hold, so the
+      # overdue check stands down rather than blaming it.
+      ORACLE_MAX_DEV_TICKS: '50'
       DIVERGENCE_BPS: '200'
       STALE_SECONDS: '28800'
     networks:

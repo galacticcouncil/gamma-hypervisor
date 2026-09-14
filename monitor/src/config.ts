@@ -7,6 +7,7 @@ const Env = z.object({
   VAULT: z.string().regex(/^0x[0-9a-fA-F]{40}$/),
   POOL: z.string().regex(/^0x[0-9a-fA-F]{40}$/),
   CLEARING: z.string().regex(/^0x[0-9a-fA-F]{40}$/),
+  REBALANCE_PROXY: z.string().regex(/^0x[0-9a-fA-F]{40}$/),
   PRICE_FEED: z.string().regex(/^0x[0-9a-fA-F]{40}$/),
 
   /** Discord webhook. Absent => alerts are logged only, which is a valid dry run. */
@@ -21,11 +22,34 @@ const Env = z.object({
   GAS_FLOOR_WEI: z.string().regex(/^\d+$/).default('1000000000000000'),  // 0.001, mirror the keeper
 
   /**
-   * A keeper with nothing to do is silent, so silence alone is not failure.
-   * At COMPOUND_INTERVAL_SECS=3600 expect a transaction roughly hourly; 4h of
-   * no nonce movement means it is wedged, crashed, or out of gas.
+   * Liveness is measured as WORK THAT WAS DUE AND DID NOT HAPPEN, never as
+   * "no transactions lately".
+   *
+   * The nonce is not a liveness signal. A correctly-running keeper sends
+   * nothing for days: it rebalances only when drift exceeds its threshold, and
+   * its hourly compound is a no-op whenever the vault holds no idle balance
+   * (`compound: nothing idle to sweep`). Alerting on a static nonce produced a
+   * day of false criticals on a keeper that was healthy throughout.
+   *
+   * So: mirror the keeper's own rebalance trigger from chain state, and alert
+   * only when it has been tripped for longer than the keeper could legitimately
+   * take to act.
    */
-  STALL_MINUTES: z.coerce.number().int().positive().default(240),
+  /** Must match the keeper's REBALANCE_THRESHOLD_MULT. */
+  REBALANCE_THRESHOLD_MULT: z.coerce.number().int().positive().default(11),
+  /** Must match the keeper's MIN_INTERVAL_SECS — it may not act sooner. */
+  MIN_INTERVAL_SECS: z.coerce.number().int().positive().default(21600),
+  /**
+   * Grace on top of minInterval before a tripped trigger counts as a failure.
+   * Covers dwell (DWELL_BLOCKS), the oracle-agreement gate, and regime holds.
+   */
+  REBALANCE_GRACE_SECS: z.coerce.number().int().positive().default(7200),
+  /**
+   * The keeper is RIGHT to hold while pool and oracle disagree — that is the
+   * anti-manipulation gate. Above this, a missed rebalance is expected, not a
+   * fault, so the check stands down. Must match the keeper's ORACLE_MAX_DEV_TICKS.
+   */
+  ORACLE_MAX_DEV_TICKS: z.coerce.number().int().positive().default(50),
   /** Pool vs oracle. Matches the deploy config's MAX_DIVERGENCE_BPS. */
   DIVERGENCE_BPS: z.coerce.number().int().positive().default(200),
   /** Feed age ceiling; mirrors STALE_SECONDS on the deploy side. */
