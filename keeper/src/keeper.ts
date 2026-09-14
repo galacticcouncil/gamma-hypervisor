@@ -12,6 +12,7 @@ import { preflight, type RebalanceArgs } from './preflight';
 import { txOverrides } from './chain';
 import { submitRebalance } from './submit';
 import { compoundOnce } from './compound';
+import { vaultFees } from './feesOwed';
 import { fetchVolBaseline } from './indexer';
 import { isReservePaused } from './moneyMarket';
 import { PriceHistory } from './priceHistory';
@@ -260,20 +261,50 @@ async function runCompound(
   base: [number, number],
 ): Promise<boolean> {
   const { cfg, vault, signer } = ctx;
-  const [limitLower, limitUpper, [idle0, idle1]] = await Promise.all([
+  const [limitLower, limitUpper, [idle0, idle1], slot0] = await Promise.all([
     vault.limitLower(),
     vault.limitUpper(),
     readIdleBalances(ctx.token0, ctx.token1, vault.address),
+    ctx.pool.slot0(),
   ]);
 
-  if (idle0.isZero() && idle1.isZero()) {
-    log('  compound: nothing idle to sweep');
+  // Gate on idle PLUS fees still owed inside the positions.
+  //
+  // Gating on the idle balance alone made the sweep unreachable in steady
+  // state: fees accrue inside the Uniswap position and only become idle when
+  // something burns or collects — and the only thing that does is this very
+  // compound. Measured on mainnet: $25.19 of fees accrued while the keeper
+  // logged `nothing idle to sweep` hourly for days.
+  const [fees0, fees1] = await vaultFees(
+    ctx.pool,
+    vault.address,
+    base,
+    [Number(limitLower), Number(limitUpper)],
+    Number(slot0.tick),
+  );
+  const sweep0 = idle0.add(fees0);
+  const sweep1 = idle1.add(fees1);
+
+  if (sweep0.isZero() && sweep1.isZero()) {
+    log('  compound: nothing to sweep (no idle balance, no fees owed)');
     return false;
   }
 
+  // Value the token0 leg in token1 so one threshold covers both sides.
+  const sqrt = BigInt(sqrtPriceX96.toString());
+  const value1 = BigInt(sweep1.toString()) + (BigInt(sweep0.toString()) * sqrt * sqrt) / (1n << 192n);
+  if (value1 < BigInt(cfg.compoundMinFees1.toString())) {
+    log(`  compound: ${value1} below COMPOUND_MIN_FEES1 ${cfg.compoundMinFees1.toString()}`);
+    return false;
+  }
+  log(`  compound: sweeping idle ${idle0}/${idle1} + fees owed ${fees0}/${fees1}`);
+
+  // Mins are derived from what the mint will actually consume — idle plus the
+  // fees this call is about to collect — so they are never all-zero, which is
+  // the only protection that binds at execution time.
   const inMin = computeCompoundMins({
-    idle0,
-    idle1,
+    idle0: sweep0,
+    idle1: sweep1,
     sqrtPriceX96,
     base,
     limit: [limitLower, limitUpper],
