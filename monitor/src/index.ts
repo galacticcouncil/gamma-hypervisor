@@ -13,6 +13,11 @@ import { notify } from './notify';
  *
  * Alerts are edge-triggered — fire on transition, repeat only every
  * REALERT_SECS, and send one recovery message when the condition clears.
+ *
+ * Liveness is deliberately NOT "has the keeper sent a transaction lately". A
+ * healthy keeper is silent for days, and an earlier nonce-based check produced
+ * a day of false criticals on a keeper that was working correctly throughout.
+ * What is checked instead is work that was DUE and did not happen.
  */
 const cfg = loadConfig();
 const provider = new ethers.providers.JsonRpcProvider(cfg.RPC_URL);
@@ -46,7 +51,7 @@ async function cycle(): Promise<void> {
     firing.delete(key);
     await notify(cfg, 'recovered', `Resolved: ${prev.f.title}`, 'Condition no longer detected.');
   }
-  if (!findings.length) console.log(`ok — nothing firing (nonce ${memo.lastNonce})`);
+  if (!findings.length) console.log('ok — nothing firing');
 }
 
 console.log(`gamma monitor: ${cfg.RPC_URL}, every ${cfg.CHECK_INTERVAL_SECS}s, webhook ${cfg.DISCORD_WEBHOOK ? 'set' : 'NOT set (log only)'}`);
