@@ -46,6 +46,14 @@ const Env = z
     // Escape hatch for throwaway local chains ONLY: run live without a TWAP gate.
     ALLOW_UNSAFE_SPOT: boolEnv(false),
 
+    // --- limit refresh ---
+    // Re-place a stranded limit order next to the price without moving the base
+    // band (zero translation/width, so the RebalanceProxy caps are trivially
+    // satisfied). Fires when spot sits more than LIMIT_REFRESH_TICKS outside
+    // the limit range; shares the rebalance dwell, cooldown and price gates.
+    LIMIT_REFRESH_ENABLED: boolEnv(true),
+    LIMIT_REFRESH_TICKS: z.coerce.number().int().positive().default(120),
+
     // Slippage bounds on the rebalance burn/mint legs, in bps of the expected
     // amount. COUPLED TO BASE_HALF_WIDTH_MULT: a position's composition swings
     // from all-token0 to all-token1 across the band, so the legs move roughly
