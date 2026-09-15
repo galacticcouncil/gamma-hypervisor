@@ -1,7 +1,7 @@
 import { ethers } from 'ethers';
 import type { Ctx, ProxyCaps } from './chain';
 import { readLastRebalanceTs, readProxyCaps } from './chain';
-import { shouldRebalance } from './decide';
+import { shouldRebalance, shouldRefreshLimit } from './decide';
 import { centeredBand, clampBandTranslation, limitRange } from './ticks';
 import { oldestObservationAgeSecs, readSlot0, readTwapTick } from './pool';
 import { readIdleBalances, readPositions, readTotalAmounts, surplusSide } from './vault';
@@ -23,6 +23,8 @@ export interface KeeperState {
   lastRebalanceTs: number;
   /** Consecutive triggering evaluations — a spike must persist across real blocks. */
   dwell: number;
+  /** Same, for the limit-refresh trigger. */
+  refreshDwell: number;
   /** Volatility regime, and when it was entered. */
   regime: RegimeState;
   /** Feed price trail, for the "moved X% in Y minutes" checks. */
@@ -38,6 +40,7 @@ export async function initialState(ctx: Ctx): Promise<KeeperState> {
   return {
     lastRebalanceTs,
     dwell: 0,
+    refreshDwell: 0,
     // Start calm rather than extreme: the first evaluation re-derives it from
     // live inputs anyway, and booting into `extreme` would impose the full
     // re-entry wait on every restart.
@@ -331,7 +334,13 @@ export async function evaluate(ctx: Ctx, blockNumber: number, state: KeeperState
   const { cfg, vault, pool, provider, signer } = ctx;
 
   const { sqrtPriceX96, tick: spotTick } = await readSlot0(pool);
-  const [baseLower, baseUpper] = await Promise.all([vault.baseLower(), vault.baseUpper()]);
+  const [baseLower, baseUpper, limitLower0, limitUpper0, limitPos] = await Promise.all([
+    vault.baseLower(),
+    vault.baseUpper(),
+    vault.limitLower(),
+    vault.limitUpper(),
+    vault.getLimitPosition(),
+  ]);
 
   // Trigger on spot: has price actually left the band / drifted from its center?
   // WHERE the band goes is decided later, from the TWAP, once the gates have run.
@@ -343,6 +352,21 @@ export async function evaluate(ctx: Ctx, blockNumber: number, state: KeeperState
     rebalanceThresholdMult: cfg.REBALANCE_THRESHOLD_MULT,
   });
 
+  // Limit refresh: re-place a stranded limit next to the price, base unchanged.
+  // Subordinate to the drift trigger — a full re-center re-places the limit
+  // anyway, so refresh only fires when the band itself has no reason to move.
+  // Requires an existing base: on a bootstrap vault there is nothing to keep.
+  const refresh =
+    cfg.LIMIT_REFRESH_ENABLED && baseUpper > baseLower && !decision.trigger
+      ? shouldRefreshLimit({
+          spotTick,
+          limitLower: Number(limitLower0),
+          limitUpper: Number(limitUpper0),
+          limitLiquidity: BigInt(limitPos.liquidity.toString()),
+          refreshTicks: cfg.LIMIT_REFRESH_TICKS,
+        })
+      : { trigger: false, reason: 'refresh disabled, no base, or drift trigger active' };
+
   const block = await provider.getBlock(blockNumber);
   const now = block?.timestamp ?? Math.trunc(Date.now() / 1000);
 
@@ -353,10 +377,12 @@ export async function evaluate(ctx: Ctx, blockNumber: number, state: KeeperState
 
   log(
     `#${blockNumber} tick=${spotTick} base=[${baseLower},${baseUpper}] ` +
-      `${decision.trigger ? 'TRIGGER' : 'hold'}${compoundDue ? ' +compound-due' : ''} — ${decision.reason}`,
+      `${decision.trigger ? 'TRIGGER' : refresh.trigger ? 'REFRESH' : 'hold'}` +
+      `${compoundDue ? ' +compound-due' : ''} — ${decision.trigger || !refresh.trigger ? decision.reason : refresh.reason}`,
   );
 
   if (!decision.trigger) state.dwell = 0;
+  if (!refresh.trigger) state.refreshDwell = 0;
 
   // Dwell: a single-block spike (flash-ish manipulation) cannot fire a rebalance;
   // the condition must hold across DWELL_BLOCKS consecutive evaluated blocks,
@@ -376,21 +402,34 @@ export async function evaluate(ctx: Ctx, blockNumber: number, state: KeeperState
     }
   }
 
+  // The refresh shares the dwell discipline: a stranded limit is stranded for
+  // hours, so waiting DWELL_BLOCKS costs nothing and keeps a spot flick from
+  // buying a re-place.
+  let refreshArmed = refresh.trigger;
+  if (refresh.trigger) {
+    state.refreshDwell += 1;
+    if (state.refreshDwell < cfg.DWELL_BLOCKS) {
+      log(`  arming refresh: ${state.refreshDwell}/${cfg.DWELL_BLOCKS} consecutive blocks`);
+      refreshArmed = false;
+    }
+  }
+
   // Cooldown — mirror the on-chain proxy interval (when present) to avoid
   // predictable reverts, and enforce our own floor either way. Checked before
   // the price gates so a cooled-down keeper does not pay for their RPC calls.
   let caps: ProxyCaps | undefined;
-  if (rebalanceArmed) {
+  if (rebalanceArmed || refreshArmed) {
     caps = ctx.proxy ? await readProxyCaps(ctx.proxy, vault.address) : undefined;
     const minInterval = Math.max(cfg.MIN_INTERVAL_SECS, caps?.minIntervalSecs ?? 0);
     const lastTs = Math.max(state.lastRebalanceTs, caps?.lastRebalanceTs ?? 0);
     if (lastTs > 0 && now - lastTs < minInterval) {
       log(`  skip: min interval (${now - lastTs}s < ${minInterval}s)`);
       rebalanceArmed = false;
+      refreshArmed = false;
     }
   }
 
-  if (!rebalanceArmed && !compoundDue) return;
+  if (!rebalanceArmed && !refreshArmed && !compoundDue) return;
 
   // --- price gates, shared by both actions -------------------------------
   const gate = await checkPrice(ctx, spotTick, now);
@@ -425,7 +464,7 @@ export async function evaluate(ctx: Ctx, blockNumber: number, state: KeeperState
     }
   }
 
-  if (!rebalanceArmed) return;
+  if (!rebalanceArmed && !refreshArmed) return;
 
   if (regime === 'extreme') {
     log(`  skip: regime EXTREME`);
@@ -454,8 +493,15 @@ export async function evaluate(ctx: Ctx, blockNumber: number, state: KeeperState
 
   // New base band, centered on the placement tick; in proxy mode, walk toward it
   // within the on-chain translation cap and respect the width cap.
-  let newBase = centeredBand(placementTick, bandMult, ctx.tickSpacing);
-  if (caps && !caps.exempted) {
+  //
+  // A refresh keeps the base EXACTLY as it is: zero translation and zero width
+  // change satisfy the proxy caps by construction, and the whole point is to
+  // re-place only the limit. (When both triggers armed on the same block the
+  // re-center wins — it re-places the limit anyway.)
+  let newBase: [number, number] = rebalanceArmed
+    ? centeredBand(placementTick, bandMult, ctx.tickSpacing)
+    : [Number(baseLower), Number(baseUpper)];
+  if (rebalanceArmed && caps && !caps.exempted) {
     try {
       const c = clampBandTranslation(newBase, [baseLower, baseUpper], caps.maxTranslation, bandMult, ctx.tickSpacing);
       if (c.clamped) log(`  clamp: walking band toward target within maxTranslation ${caps.maxTranslation}`);
@@ -500,7 +546,10 @@ export async function evaluate(ctx: Ctx, blockNumber: number, state: KeeperState
     outMin,
   };
 
-  log(`  plan: base=[${args.baseLower},${args.baseUpper}] limit=[${limitLower},${limitUpper}] surplus=${side} tol=${cfg.MINS_TOLERANCE_BPS}bps`);
+  log(
+    `  plan${rebalanceArmed ? '' : ' (limit refresh, base unchanged)'}: ` +
+      `base=[${args.baseLower},${args.baseUpper}] limit=[${limitLower},${limitUpper}] surplus=${side} tol=${cfg.MINS_TOLERANCE_BPS}bps`,
+  );
 
   if (cfg.DRY_RUN) {
     log('  DRY_RUN: not sending');
@@ -515,7 +564,8 @@ export async function evaluate(ctx: Ctx, blockNumber: number, state: KeeperState
 
   log(`  submitting rebalance via ${ctx.proxy ? 'RebalanceProxy' : 'Hypervisor (direct)'}…`);
   const hash = await submitRebalance(ctx, args);
-  log(`  ✓ rebalanced — ${hash}`);
+  log(`  ✓ ${rebalanceArmed ? 'rebalanced' : 'limit refreshed'} — ${hash}`);
   state.lastRebalanceTs = now;
   state.dwell = 0;
+  state.refreshDwell = 0;
 }

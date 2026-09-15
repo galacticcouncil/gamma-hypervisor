@@ -27,6 +27,8 @@ services:
 
       # --- strategy, in multiples of the pool's 60-tick spacing ---
       BASE_HALF_WIDTH_MULT: '10'
+      LIMIT_REFRESH_ENABLED: 'true'
+      LIMIT_REFRESH_TICKS: '120'
       LIMIT_WIDTH_MULT: '1'
       REBALANCE_THRESHOLD_MULT: '5'
 
