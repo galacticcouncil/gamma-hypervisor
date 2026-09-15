@@ -52,7 +52,7 @@ services:
       BASE_HALF_WIDTH_MULT: '16'
       LIMIT_REFRESH_ENABLED: 'true'
       LIMIT_REFRESH_TICKS: '120'
-      LIMIT_WIDTH_MULT: '1'
+      LIMIT_WIDTH_MULT: '16'
       # 11/16 = 69% of the half-width: spec §D2's "re-centre at 70% displacement".
       REBALANCE_THRESHOLD_MULT: '11'
 
