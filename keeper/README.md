@@ -4,6 +4,10 @@ Off-chain keeper for the Gamma ALM Hypervisor on Hydration. Each block it reads 
 Uniswap-v3 pool tick and, when price has drifted out of (or far from the center of)
 the vault's base band, calls `rebalance(...)` to re-center.
 
+One process keeps **any number of vaults** — see [Several vaults in one
+process](#several-vaults-in-one-process). A flat environment still configures a
+single vault exactly as it always did.
+
 ## The manipulation question (read this first)
 
 A concentrated-liquidity vault that re-centers on **spot** is exploitable: push the
@@ -17,7 +21,7 @@ Four independent layers, each of which alone would blunt the attack:
 |---|---|---|
 | **Placement off TWAP** | Spot may *trigger* a rebalance; the band is centered on the pool **TWAP** tick. Pushing spot cannot drag the band to the pushed price. | `TWAP_ENABLED` |
 | **Deviation gate** | If spot and TWAP disagree by more than `MAX_DEV_TICKS`, do nothing at all. | `MAX_DEV_TICKS` |
-| **Dwell + cooldown** | The trigger must hold for `DWELL_BLOCKS` consecutive blocks, and rebalances are `MIN_INTERVAL_SECS` apart. Flash loans do not survive a block boundary; holding a fake price for real time costs real money and bleeds to arbitrage. | `DWELL_BLOCKS`, `MIN_INTERVAL_SECS` |
+| **Dwell + cooldown** | The trigger must hold continuously for `DWELL_SECS`, and rebalances are `MIN_INTERVAL_SECS` apart. Flash loans do not survive a block boundary; holding a fake price for real time costs real money and bleeds to arbitrage. | `DWELL_SECS`, `MIN_INTERVAL_SECS` |
 | **External oracle clamp** | The pool TWAP itself is walkable given enough capital and patience. An exchange-fed price oracle is not. Rebalance only if the pool agrees with the outside world. | `ORACLE_*` |
 
 Plus **non-zero slippage bounds** (`MINS_TOLERANCE_BPS`): if the price moves between
@@ -61,13 +65,13 @@ npm start         # live
 ```
 
 Bring the chain + vault up first (see `../zombienet/README.md`). To watch a rebalance
-fire, push the pool price with a large swap, then wait `DWELL_BLOCKS` blocks.
+fire, push the pool price with a large swap, then wait `DWELL_SECS`.
 
 ## How it decides (each block)
 
 1. read `pool.slot0()` (spot tick) and the vault's `baseLower/baseUpper`;
 2. **trigger** if spot left the band, or drifted more than `REBALANCE_THRESHOLD_MULT × tickSpacing` from its center; with no drift trigger, a stranded limit fires a **limit refresh** (`LIMIT_REFRESH_ENABLED`), and a half-traversed one fires a **fold at balance** (`FOLD_ENABLED`) — both zero-translation rebalances that leave the base ticks alone;
-3. **dwell** — the trigger must hold `DWELL_BLOCKS` blocks in a row;
+3. **dwell** — the trigger must hold continuously for `DWELL_SECS`;
 4. **cooldown** — `MIN_INTERVAL_SECS`, and the proxy's on-chain `minInterval`;
 5. **TWAP gate** — window clamped to the pool's actual history; skip if `|spot − TWAP| > MAX_DEV_TICKS`. The TWAP tick becomes the **placement** tick;
 6. **oracle clamp** — skip if the pool disagrees with the price feed by more than `ORACLE_MAX_DEV_TICKS`, or the feed is older than `ORACLE_MAX_AGE_SECS`;
@@ -81,6 +85,7 @@ fire, push the pool price with a large swap, then wait `DWELL_BLOCKS` blocks.
 
 | var | default | meaning |
 |---|---|---|
+| `VAULTS_JSON` / `VAULTS_FILE` | — | list of per-vault overrides; see below |
 | `RPC_URL` | `http://127.0.0.1:9999` | EVM JSON-RPC |
 | `PRIVATE_KEY` | — (required) | owner key (`direct`) or rebalancer key (`proxy`) |
 | `VAULT` | zombienet Hypervisor | Gamma vault address |
@@ -96,7 +101,8 @@ fire, push the pool price with a large swap, then wait `DWELL_BLOCKS` blocks.
 | `FOLD_MIN_LIMIT_SHARE` | `0.05` | ignore limits under this fraction of NAV |
 | **gates** | | |
 | `MIN_INTERVAL_SECS` | `600` | min seconds between rebalances |
-| `DWELL_BLOCKS` | `3` | consecutive triggering blocks required |
+| `DWELL_SECS` | derived | seconds the trigger must hold continuously |
+| `DWELL_BLOCKS` | `3` | **deprecated** — derives `DWELL_SECS` when that is unset |
 | `TWAP_ENABLED` | `true` | gate spot vs pool `observe()` TWAP, and place off TWAP |
 | `TWAP_WINDOW_SECS` | `3600` | TWAP window (clamped to available history) |
 | `MIN_TWAP_WINDOW_SECS` | `600` | refuse to act on less history than this |
@@ -174,6 +180,117 @@ Config refuses to start on the dangerous combinations: `ENTRYPOINT=proxy` withou
 proxy address, a live run without `FEE_RECIPIENT`, `ORACLE_ENABLED` without a feed,
 and a live run with the TWAP gate off unless `ALLOW_UNSAFE_SPOT=true`.
 
+## Several vaults in one process
+
+One keeper, one signer, one nonce, N pools. The alternative — a service per pool —
+means a key, a gas balance, a deployment and a monitoring target per pool, all of
+which have to stay in step with each other.
+
+### Config precedence
+
+The **flat environment is the defaults layer**. Every variable above keeps its
+meaning and becomes the default *for every vault*. On top of that:
+
+| var | meaning |
+|---|---|
+| `VAULTS_JSON` | a JSON **array** of per-vault override objects, inline |
+| `VAULTS_FILE` | a path to a file containing that same array |
+
+`VAULTS_FILE` wins if both are set — a file is the deliberate, reviewable form, and
+a leftover inline `VAULTS_JSON` must not quietly beat it. **With neither set the
+keeper synthesises a one-element list from `VAULT`**, so an existing single-vault
+deployment runs unchanged.
+
+Each array element is a *partial*: it is merged over the defaults and then validated
+with the same refinements, **per vault**. A key set to JSON `null` drops the
+inherited default rather than overriding it. A duplicate vault address is a fatal
+error — two contexts on one vault would race each other for the signer's nonce.
+
+```jsonc
+// VAULTS_FILE=/run/config/vaults.json
+[
+  { "VAULT": "0xa206…648A" },                                  // inherits everything
+  { "VAULT": "0x1234…5678",                                    // 0.05% tier: spacing 10,
+    "BASE_HALF_WIDTH_MULT": 96,                                //   so a different multiple
+    "REBALANCE_THRESHOLD_MULT": 66,
+    "ORACLE_FEED0": "0xFBCa0A6dC5B74C042DF23025D99ef0F1fcAC6702" }
+]
+```
+
+### What is global and what is per vault
+
+**Global** (one signer, one connection, one process): `RPC_URL`, `PRIVATE_KEY`,
+`POLL_INTERVAL_MS`, `CONFIRMATIONS`, `GAS_LIMIT`, `GAS_PRICE_MARKUP_PCT`,
+`GAS_FLOOR_WEI`, `DRY_RUN`, `STARTUP_LOOKBACK_BLOCKS`, `INDEXER_URL`,
+`INDEXER_TIMEOUT_MS`, `MM_DATA_PROVIDER`. Setting one of these inside a vault
+object is an error, not a silent no-op.
+
+**Per vault** (everything else): `VAULT`, `ENTRYPOINT`, `REBALANCE_PROXY`,
+`ADMIN_ADDRESS`, `FEE_RECIPIENT`, the whole strategy block, the gates, all
+`ORACLE_*`, all `REGIME_*` / `VOL_*` / `ELEVATED_*` / `MOVE_*`, `MM_UNDERLYING`,
+`INDEXER_BASE_ASSET` / `INDEXER_QUOTE_ASSET`, and all `COMPOUND_*`.
+
+`BASE_HALF_WIDTH_MULT` **must** be per vault: it is denominated in the pool's
+`tickSpacing`, and a different fee tier is a different spacing, so one shared value
+would mean a different band width on every pool.
+
+### Scheduling
+
+One block subscription. Each block, every vault is evaluated **in order**, and a
+global `busy` flag skips a block if the previous cycle has not finished. Because a
+submit already waits `CONFIRMATIONS`, that leaves exactly one transaction in flight
+at a time — which is what a single signer's nonce wants. There is deliberately **no
+concurrency and no nonce manager**.
+
+Failures are scoped accordingly:
+
+- a **config** error is fatal for the process, at startup — it is operator error,
+  and half a keeper is worse than none;
+- a **runtime** error during a block is per vault, logged, and the remaining vaults
+  are still evaluated.
+
+Every log line is prefixed with the vault's tag (`[aDOT/HOLLAR]`, derived from the
+token symbols and disambiguated by address when two pools share a pair). Without
+that, interleaved output is unreadable.
+
+### One vault at a time
+
+`npm run once` and `npm run smoke` take `--vault <address>`:
+
+```sh
+npm run once -- --vault 0xa206D0959813f17c17C87147271C49065438648A
+```
+
+With one vault configured the selector is optional. With several and no selector,
+`once` errors with the list rather than guessing which pool to touch.
+
+## Dwell is wall clock, not blocks
+
+`DWELL_BLOCKS` counted **evaluated** blocks — and the keeper skips blocks while an
+evaluation is in flight, so the number it counted was never the number of blocks
+that passed. With several vaults per cycle the gap widens: each cycle takes longer,
+more blocks are skipped, and 900 evaluations take progressively longer in real time
+as pools are added. An anti-manipulation gate that silently tightens with pool count
+is not a gate you can reason about.
+
+`DWELL_SECS` says what the gate has always meant: **the trigger has held
+continuously for X seconds.** It is the knob to set.
+
+`DWELL_BLOCKS` still works as a deprecated alias. When `DWELL_SECS` is unset the
+keeper measures the chain's block time at startup and derives
+`DWELL_SECS = DWELL_BLOCKS × blockTime`, logging loudly what it resolved to:
+
+```
+[aDOT/HOLLAR]   ⚠ dwell      derived from deprecated DWELL_BLOCKS=900 x 2.25s/block
+                             measured at startup = 2025s (~34 min) — set DWELL_SECS explicitly
+```
+
+Mainnet's `DWELL_BLOCKS: 900` at Hydration's ~2.25s blocks derives as 2025s — the
+~34 minutes it has actually been enforcing, so the upgrade does not retune a live
+gate. The same history is the argument for the change: this value was `300` when
+blocks were 6s, and the block-time change to 2s silently cut the dwell to a third
+of its intended length.
+
 ## Fees
 
 `Hypervisor.fee` is a **divisor**, not a percentage: `fee = 5` means the fee recipient
@@ -248,7 +365,7 @@ reasoning inline. The differences that matter:
 | `ORACLE_ENABLED` | `false` | **`true`** |
 | `BASE_HALF_WIDTH_MULT` | `10` (±6.2%) | **`16`** (+10.08% / −9.15%) |
 | `MIN_INTERVAL_SECS` | `600` | **`21600`** (6h) |
-| `DWELL_BLOCKS` | `3` (~18s) | **`300`** (~30 min) |
+| `DWELL_BLOCKS` | `3` (~18s) | **`900`** (~34 min, i.e. `DWELL_SECS=2025`) |
 | `MIN_TWAP_WINDOW_SECS` | `600` | **`3000`** |
 | `MAX_DEV_TICKS` | `100` (1.0%) | **`50`** (0.5%) |
 | `ORACLE_MAX_DEV_TICKS` | `200` (2.0%) | **`50`** (0.5%) |

@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import { readFileSync } from 'node:fs';
 import { z } from 'zod';
 import { ethers } from 'ethers';
 
@@ -36,7 +37,17 @@ const Env = z
 
     // --- anti-manipulation gates (defaults are the hardened settings) ---
     MIN_INTERVAL_SECS: z.coerce.number().int().nonnegative().default(600),
+    // How long the trigger must hold before a rebalance is armed.
+    //
+    // DWELL_SECS is the real knob: the gate means "this has been true
+    // continuously for X seconds", and wall clock is the only unit in which
+    // that statement is stable. DWELL_BLOCKS is the deprecated spelling —
+    // it counted EVALUATED blocks, and evaluations are skipped while one is in
+    // flight, so with several vaults in one process 900 of them take longer and
+    // longer in real time. Left unset, DWELL_SECS is derived from DWELL_BLOCKS
+    // times the block time measured at startup (see resolveDwellSecs).
     DWELL_BLOCKS: z.coerce.number().int().positive().default(3),
+    DWELL_SECS: z.coerce.number().int().positive().optional(),
     TWAP_ENABLED: boolEnv(true),
     TWAP_WINDOW_SECS: z.coerce.number().int().positive().default(3600),
     // The window is clamped to the pool's oldest observation; below this floor the
@@ -233,16 +244,309 @@ const Env = z
     }
   });
 
+/**
+ * One vault's settings: the global layer unioned with that vault's overrides,
+ * flattened back to exactly the shape a single-vault keeper had. Deliberately
+ * flat — every `ctx.cfg.FOO` in keeper.ts / mins.ts / preflight.ts reads the
+ * same as it did when there was only one vault.
+ */
 export type Config = z.infer<typeof Env> & {
   gasFloorWei: ethers.BigNumber;
   compoundMinFees1: ethers.BigNumber;
 };
 
-export function loadConfig(): Config {
-  const e = Env.parse(process.env);
+// ---------------------------------------------------------------------------
+// Multi-vault layering
+//
+// The flat environment is the DEFAULTS layer. VAULTS_JSON / VAULTS_FILE carry a
+// list of PARTIAL overrides, each merged over those defaults and then validated
+// with the same refinements, per vault. Nothing currently deployed changes
+// meaning: with neither set, the list is synthesised from VAULT and the result
+// is byte-for-byte the old single-vault parse.
+// ---------------------------------------------------------------------------
+
+/** One signer, one RPC connection, one process — these cannot vary per vault. */
+export const GLOBAL_KEYS = [
+  'RPC_URL',
+  'PRIVATE_KEY',
+  'POLL_INTERVAL_MS',
+  'CONFIRMATIONS',
+  'GAS_LIMIT',
+  'GAS_PRICE_MARKUP_PCT',
+  'GAS_FLOOR_WEI',
+  'DRY_RUN',
+  'STARTUP_LOOKBACK_BLOCKS',
+  'INDEXER_URL',
+  'INDEXER_TIMEOUT_MS',
+  'MM_DATA_PROVIDER',
+] as const;
+
+/**
+ * Everything a vault may override.
+ *
+ * BASE_HALF_WIDTH_MULT is in here and must stay here: it is denominated in the
+ * pool's tickSpacing, and a different fee tier is a different spacing, so a
+ * shared value would mean a different band width on every pool.
+ */
+export const VAULT_KEYS = [
+  'VAULT',
+  'ENTRYPOINT',
+  'REBALANCE_PROXY',
+  'ADMIN_ADDRESS',
+  'FEE_RECIPIENT',
+  'BASE_HALF_WIDTH_MULT',
+  'LIMIT_WIDTH_MULT',
+  'REBALANCE_THRESHOLD_MULT',
+  'LIMIT_REFRESH_ENABLED',
+  'LIMIT_REFRESH_TICKS',
+  'FOLD_ENABLED',
+  'FOLD_MIN_SHARE',
+  'FOLD_MIN_LIMIT_SHARE',
+  'MIN_INTERVAL_SECS',
+  'DWELL_BLOCKS',
+  'DWELL_SECS',
+  'TWAP_ENABLED',
+  'TWAP_WINDOW_SECS',
+  'MIN_TWAP_WINDOW_SECS',
+  'MAX_DEV_TICKS',
+  'ALLOW_UNSAFE_SPOT',
+  'MINS_TOLERANCE_BPS',
+  'ORACLE_ENABLED',
+  'ORACLE_FEED0',
+  'ORACLE_FEED1',
+  'ORACLE_FEED0_SIDE',
+  'ORACLE_MAX_AGE_SECS',
+  'ORACLE_MAX_DEV_TICKS',
+  'REGIME_ENABLED',
+  'REGIME_REENTRY_SECS',
+  'ELEVATED_HALF_WIDTH_MULT',
+  'VOL_RATIO_ELEVATED',
+  'VOL_BASELINE_DAYS',
+  'VOL_BASELINE_REFRESH_SECS',
+  'MOVE_15M_ELEVATED',
+  'MOVE_1H_EXTREME',
+  'MM_UNDERLYING',
+  'INDEXER_BASE_ASSET',
+  'INDEXER_QUOTE_ASSET',
+  'COMPOUND_ENABLED',
+  'COMPOUND_MIN_FEES1',
+  'COMPOUND_INTERVAL_SECS',
+] as const;
+
+export type GlobalKey = (typeof GLOBAL_KEYS)[number];
+export type VaultKey = (typeof VAULT_KEYS)[number];
+type EnvKey = keyof z.infer<typeof Env>;
+
+// Compile-time proof that the split is a partition of the schema: a new setting
+// added above without being classified fails the build here rather than being
+// silently un-overridable.
+type _Unclassified = Exclude<EnvKey, GlobalKey | VaultKey>;
+type _Unknown = Exclude<GlobalKey | VaultKey, EnvKey>;
+const _partitionIsTotal: [_Unclassified] extends [never] ? true : never = true;
+const _partitionIsSound: [_Unknown] extends [never] ? true : never = true;
+void _partitionIsTotal;
+void _partitionIsSound;
+
+/** The process-wide half. `Chain` carries this; vaults never see a different one. */
+export type GlobalConfig = Pick<Config, GlobalKey | 'gasFloorWei'>;
+
+export interface KeeperConfig {
+  global: GlobalConfig;
+  vaults: Config[];
+}
+
+type RawEnv = Record<string, string>;
+
+function rawDefaults(): RawEnv {
+  const out: RawEnv = {};
+  for (const k of [...GLOBAL_KEYS, ...VAULT_KEYS]) {
+    const v = process.env[k];
+    if (v !== undefined && v !== '') out[k] = v;
+  }
+  return out;
+}
+
+/**
+ * JSON gives real booleans and numbers; the schema reads strings out of the
+ * environment. Normalise so `"TWAP_ENABLED": true` and `TWAP_ENABLED=true` mean
+ * the same thing — boolEnv() compares against the STRING 'true', so a raw JSON
+ * boolean would otherwise parse as false.
+ */
+function normalise(key: string, v: unknown): string | undefined {
+  if (v === null || v === undefined) return undefined; // explicit "inherit nothing"
+  if (typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean') return String(v);
+  throw new Error(`vault override ${key}: expected a string, number or boolean, got ${typeof v}`);
+}
+
+function mergeVault(defaults: RawEnv, override: Record<string, unknown>, where: string): RawEnv {
+  const merged: RawEnv = { ...defaults };
+  for (const [k, v] of Object.entries(override)) {
+    if (!(VAULT_KEYS as readonly string[]).includes(k)) {
+      const global = (GLOBAL_KEYS as readonly string[]).includes(k);
+      throw new Error(
+        `${where}: ${k} is ${global ? 'a GLOBAL setting — set it in the environment, not per vault' : 'not a known keeper setting'}`,
+      );
+    }
+    const s = normalise(k, v);
+    if (s === undefined) delete merged[k];
+    else merged[k] = s;
+  }
+  return merged;
+}
+
+function parseVault(raw: RawEnv, where: string): Config {
+  const r = Env.safeParse(raw);
+  if (!r.success) {
+    const issues = r.error.issues.map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ');
+    throw new Error(`${where}: ${issues}`);
+  }
+  const e = r.data;
   return {
     ...e,
     gasFloorWei: ethers.BigNumber.from(e.GAS_FLOOR_WEI),
     compoundMinFees1: ethers.BigNumber.from(e.COMPOUND_MIN_FEES1),
   };
+}
+
+function readVaultList(): Record<string, unknown>[] | undefined {
+  // VAULTS_FILE wins: a file is the deliberate, reviewable form, and a leftover
+  // inline VAULTS_JSON in a stack file must not quietly beat it.
+  const file = process.env.VAULTS_FILE;
+  const inline = process.env.VAULTS_JSON;
+  const [src, where] = file
+    ? [readFileSync(file, 'utf8'), `VAULTS_FILE ${file}`]
+    : inline
+      ? [inline, 'VAULTS_JSON']
+      : [undefined, ''];
+  if (src === undefined) return undefined;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(src);
+  } catch (e: any) {
+    throw new Error(`${where}: not valid JSON (${e?.message ?? e})`);
+  }
+  if (!Array.isArray(parsed)) throw new Error(`${where}: expected a JSON array of vault objects`);
+  if (parsed.length === 0) throw new Error(`${where}: empty vault list`);
+  return parsed.map((v, i) => {
+    if (typeof v !== 'object' || v === null || Array.isArray(v)) {
+      throw new Error(`${where}[${i}]: expected an object of per-vault overrides`);
+    }
+    return v as Record<string, unknown>;
+  });
+}
+
+/**
+ * The whole configuration: one global layer plus N fully-merged vault configs.
+ *
+ * Fails fast and loudly — a config error is operator error, and a keeper that
+ * starts half-configured is worse than one that refuses to start.
+ */
+export function loadKeeperConfig(): KeeperConfig {
+  const defaults = rawDefaults();
+  const overrides = readVaultList() ?? [{}]; // no list: the flat env IS the one vault
+  const where = process.env.VAULTS_FILE
+    ? `VAULTS_FILE ${process.env.VAULTS_FILE}`
+    : process.env.VAULTS_JSON
+      ? 'VAULTS_JSON'
+      : 'env';
+
+  const vaults = overrides.map((o, i) => {
+    const label = overrides.length === 1 && where === 'env' ? 'config' : `${where}[${i}]`;
+    const merged = mergeVault(defaults, o, label);
+    const cfg = parseVault(merged, `${label}${merged.VAULT ? ` (${merged.VAULT})` : ''}`);
+    return cfg;
+  });
+
+  const seen = new Map<string, number>();
+  for (const [i, v] of vaults.entries()) {
+    const key = v.VAULT.toLowerCase();
+    const first = seen.get(key);
+    if (first !== undefined) {
+      throw new Error(
+        `duplicate vault address ${v.VAULT} at ${where}[${first}] and ${where}[${i}] — ` +
+          'two contexts on one vault would race each other for the signer nonce',
+      );
+    }
+    seen.set(key, i);
+  }
+
+  const g = vaults[0];
+  const global = Object.fromEntries([
+    ...GLOBAL_KEYS.map((k) => [k, g[k]]),
+    ['gasFloorWei', g.gasFloorWei],
+  ]) as GlobalConfig;
+
+  return { global, vaults };
+}
+
+/**
+ * Single-vault config, exactly as before multi-vault existed.
+ *
+ * Still the right entry point for anything that is inherently one-vault (the
+ * tests, `smoke.ts` on a selected vault). `loadKeeperConfig()` is what the
+ * keeper itself uses.
+ */
+export function loadConfig(): Config {
+  return parseVault(rawDefaults(), 'config');
+}
+
+/**
+ * Resolve the dwell gate to wall-clock seconds.
+ *
+ * DWELL_BLOCKS counted *evaluated* blocks, and the keeper skips blocks while an
+ * evaluation is in flight — so the same number meant a longer and longer real
+ * interval as vaults were added to the process. The gate has always meant "the
+ * trigger has held continuously for X", so say that in seconds.
+ *
+ * Mainnet runs DWELL_BLOCKS=900 at Hydration's ~2.25s blocks, which this
+ * derives as 2025s (~34 min) — the interval it has actually been enforcing.
+ */
+export function resolveDwellSecs(
+  cfg: Pick<Config, 'DWELL_SECS' | 'DWELL_BLOCKS'>,
+  blockTimeSecs: number,
+): { secs: number; derived: boolean; note: string } {
+  if (cfg.DWELL_SECS !== undefined) {
+    return { secs: cfg.DWELL_SECS, derived: false, note: `DWELL_SECS=${cfg.DWELL_SECS}` };
+  }
+  const secs = Math.max(1, Math.round(cfg.DWELL_BLOCKS * blockTimeSecs));
+  return {
+    secs,
+    derived: true,
+    note:
+      `derived from deprecated DWELL_BLOCKS=${cfg.DWELL_BLOCKS} x ${blockTimeSecs.toFixed(2)}s/block ` +
+      `measured at startup = ${secs}s (~${(secs / 60).toFixed(0)} min) — set DWELL_SECS explicitly`,
+  };
+}
+
+
+/**
+ * Pick one vault out of the configured list, for the one-shot tools.
+ *
+ * With a single vault configured there is nothing to choose. With several, the
+ * caller must say which — guessing would run the wrong pool, and the cost of
+ * that is a real transaction on real liquidity.
+ */
+export function selectVault(vaults: Config[], selector?: string): Config {
+  if (selector) {
+    const hit = vaults.find((v) => v.VAULT.toLowerCase() === selector.toLowerCase());
+    if (hit) return hit;
+    if (vaults.length > 1) {
+      throw new Error(
+        `no configured vault matches ${selector}. Configured: ${vaults.map((v) => v.VAULT).join(', ')}`,
+      );
+    }
+  }
+  if (vaults.length === 1) return vaults[0];
+  throw new Error(
+    `several vaults configured — pass --vault <address> to choose one: ${vaults.map((v) => v.VAULT).join(', ')}`,
+  );
+}
+
+/** `--vault 0x…` or `--vault=0x…` from a process argv. */
+export function vaultFlag(argv: string[]): string | undefined {
+  const i = argv.indexOf('--vault');
+  if (i >= 0 && argv[i + 1]) return argv[i + 1];
+  const eq = argv.find((a) => a.startsWith('--vault='));
+  return eq ? eq.slice('--vault='.length) : undefined;
 }

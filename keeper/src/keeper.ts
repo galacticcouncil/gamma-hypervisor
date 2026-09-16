@@ -1,5 +1,5 @@
 import { ethers } from 'ethers';
-import type { Ctx, ProxyCaps } from './chain';
+import type { Chain, ProxyCaps, VaultCtx } from './chain';
 import { readLastRebalanceTs, readProxyCaps } from './chain';
 import { shouldFold, shouldRebalance, shouldRefreshLimit, type Trigger } from './decide';
 import { centeredBand, clampBandTranslation, limitRange } from './ticks';
@@ -15,42 +15,50 @@ import { compoundOnce } from './compound';
 import { vaultFees } from './feesOwed';
 import { fetchVolBaseline } from './indexer';
 import { isReservePaused } from './moneyMarket';
-import { PriceHistory } from './priceHistory';
-import { bandMultForRegime, nextRegime, type Regime, type RegimeState } from './regime';
+import { blankState, type KeeperState } from './state';
+import { bandMultForRegime, nextRegime, type Regime } from './regime';
 import { log } from './log';
 
-export interface KeeperState {
-  lastRebalanceTs: number;
-  /** Consecutive triggering evaluations — a spike must persist across real blocks. */
-  dwell: number;
-  /** Same, for the limit-refresh trigger. */
-  refreshDwell: number;
-  /** Same, for the fold-at-balance trigger. */
-  foldDwell: number;
-  /** Volatility regime, and when it was entered. */
-  regime: RegimeState;
-  /** Feed price trail, for the "moved X% in Y minutes" checks. */
-  prices: PriceHistory;
-  /** Cached 30-day vol median: the one input that needs the indexer. */
-  volBaseline?: { median: number; fetchedAt: number };
-  lastCompoundTs: number;
+export type { KeeperState } from './state';
+
+export async function initialState(ctx: VaultCtx): Promise<KeeperState> {
+  const lastRebalanceTs = await readLastRebalanceTs(ctx);
+  if (lastRebalanceTs > 0) ctx.log(`recovered last rebalance timestamp from chain: ${lastRebalanceTs}`);
+  return { ...blankState(), lastRebalanceTs };
 }
 
-export async function initialState(ctx: Ctx): Promise<KeeperState> {
-  const lastRebalanceTs = await readLastRebalanceTs(ctx);
-  if (lastRebalanceTs > 0) log(`recovered last rebalance timestamp from chain: ${lastRebalanceTs}`);
-  return {
-    lastRebalanceTs,
-    dwell: 0,
-    refreshDwell: 0,
-    foldDwell: 0,
-    // Start calm rather than extreme: the first evaluation re-derives it from
-    // live inputs anyway, and booting into `extreme` would impose the full
-    // re-entry wait on every restart.
-    regime: { regime: 'calm', since: 0 },
-    prices: new PriceHistory(2 * 60 * 60),
-    lastCompoundTs: 0,
-  };
+/**
+ * The dwell gate for one vault, in wall-clock seconds.
+ *
+ * A single-block spike (flash-ish manipulation) must not fire a rebalance: the
+ * condition has to hold CONTINUOUSLY for `ctx.dwellSecs`, which costs an
+ * attacker real capital held against arbitrage for that whole time. The clock
+ * resets only when the trigger clears — a gate blocking downstream leaves it
+ * armed, since the trigger genuinely did persist.
+ *
+ * Seconds, not evaluated blocks: `evaluate` is skipped while another evaluation
+ * is in flight, so a block count drifts with how long a cycle takes — and with
+ * several vaults sharing the process, it drifts with how many pools there are.
+ *
+ * Exported because it is the whole gate, and because per-vault state isolation
+ * is exactly what a test needs to pin down.
+ */
+export function stepDwell(
+  ctx: Pick<VaultCtx, 'state' | 'dwellSecs' | 'log'>,
+  field: 'dwellSince' | 'refreshDwellSince' | 'foldDwellSince',
+  trigger: boolean,
+  now: number,
+  label: string,
+): boolean {
+  if (!trigger) {
+    ctx.state[field] = 0;
+    return false;
+  }
+  if (ctx.state[field] === 0) ctx.state[field] = now;
+  const held = now - ctx.state[field];
+  if (held >= ctx.dwellSecs) return true;
+  ctx.log(`  arming ${label}: held ${held}s / ${ctx.dwellSecs}s`);
+  return false;
 }
 
 /**
@@ -63,7 +71,7 @@ export async function initialState(ctx: Ctx): Promise<KeeperState> {
  *    this one trigger and the feed-move triggers carry on
  */
 async function evaluateRegime(
-  ctx: Ctx,
+  ctx: VaultCtx,
   state: KeeperState,
   now: number,
   feedHealthy: boolean,
@@ -75,7 +83,7 @@ async function evaluateRegime(
   const reservePaused =
     cfg.MM_DATA_PROVIDER && cfg.MM_UNDERLYING
       ? await isReservePaused({
-          provider: ctx.provider,
+          provider: ctx.chain.provider,
           dataProvider: cfg.MM_DATA_PROVIDER,
           underlying: cfg.MM_UNDERLYING,
         })
@@ -94,11 +102,12 @@ async function evaluateRegime(
       days: cfg.VOL_BASELINE_DAYS,
       timeoutMs: cfg.INDEXER_TIMEOUT_MS,
       nowTs: now,
+      log: ctx.log,
     });
     if (baseline) {
       state.volBaseline = { median: baseline.median, fetchedAt: now };
       volRatio = baseline.current / baseline.median;
-      log(
+      ctx.log(
         `  vol: 1h ${(baseline.current * 100).toFixed(3)}% vs 30d median ` +
           `${(baseline.median * 100).toFixed(3)}% (${volRatio.toFixed(2)}x, n=${baseline.samples})`,
       );
@@ -128,20 +137,40 @@ async function evaluateRegime(
   // Regime transitions dominate annual LVR — they are the record that explains
   // the P&L, so they are logged loudly whether or not anything else happens.
   if (decision.changed) {
-    log(`  *** REGIME -> ${decision.regime.toUpperCase()}: ${decision.reason} ***`);
+    ctx.log(`  *** REGIME -> ${decision.regime.toUpperCase()}: ${decision.reason} ***`);
   }
   return decision;
 }
 
-export async function startKeeper(ctx: Ctx): Promise<void> {
-  const state = await initialState(ctx);
+/**
+ * One block subscription, N vaults, evaluated in order.
+ *
+ * `busy` is GLOBAL, not per vault: with one signer there is one nonce, and the
+ * existing `tx.wait(CONFIRMATIONS)` inside a rebalance means the cycle already
+ * serialises to one transaction in flight. That is the property we want, so no
+ * concurrency and no nonce manager — a second vault simply waits its turn.
+ *
+ * The block is fetched ONCE: it is identical for every vault, and N round trips
+ * for the same header would be pure latency.
+ */
+export async function startKeeper(chain: Chain, vaults: VaultCtx[]): Promise<void> {
   let busy = false;
 
-  ctx.provider.on('block', async (blockNumber: number) => {
+  chain.provider.on('block', async (blockNumber: number) => {
     if (busy) return; // never pipeline two rebalances; one confirms before the next block is evaluated
     busy = true;
     try {
-      await evaluate(ctx, blockNumber, state);
+      const block = await chain.provider.getBlock(blockNumber);
+      for (const v of vaults) {
+        // A runtime failure is per vault and non-fatal: one unhealthy pool must
+        // not stop the others from being kept. (Config errors are the opposite
+        // — they are fatal, at startup, in loadKeeperConfig.)
+        try {
+          await evaluate(v, blockNumber, block);
+        } catch (e: any) {
+          v.log(`#${blockNumber} error: ${e?.message ?? e}`);
+        }
+      }
     } catch (e: any) {
       log(`#${blockNumber} error: ${e?.message ?? e}`);
     } finally {
@@ -149,7 +178,7 @@ export async function startKeeper(ctx: Ctx): Promise<void> {
     }
   });
 
-  log('keeper started — watching blocks');
+  log(`keeper started — watching blocks for ${vaults.length} vault${vaults.length === 1 ? '' : 's'}`);
 }
 
 interface PriceGate {
@@ -176,7 +205,7 @@ interface PriceGate {
  * Every failure path is fail-closed. An unreadable oracle returns ok:false AND
  * feedHealthy:false so the caller can still escalate the regime on it.
  */
-async function checkPrice(ctx: Ctx, spotTick: number, now: number): Promise<PriceGate> {
+async function checkPrice(ctx: VaultCtx, spotTick: number, now: number): Promise<PriceGate> {
   const { cfg, pool } = ctx;
   let twapTick: number | undefined;
 
@@ -194,7 +223,7 @@ async function checkPrice(ctx: Ctx, spotTick: number, now: number): Promise<Pric
         return { ok: false, feedHealthy: true, twapTick,
           reason: `spot ${spotTick} vs TWAP(${window}s) ${twapTick} dev ${dev} > ${cfg.MAX_DEV_TICKS}` };
       }
-      log(`  twap ok: spot ${spotTick} vs TWAP(${window}s) ${twapTick} (dev ${dev})`);
+      ctx.log(`  twap ok: spot ${spotTick} vs TWAP(${window}s) ${twapTick} (dev ${dev})`);
     } catch (e: any) {
       return { ok: false, feedHealthy: true,
         reason: `TWAP unavailable (${e?.reason ?? e?.message ?? e}) — fail-closed` };
@@ -226,7 +255,7 @@ async function checkPrice(ctx: Ctx, spotTick: number, now: number): Promise<Pric
         return { ok: false, feedHealthy: true, twapTick, oraclePrice: o.price,
           reason: `pool ${ref} vs oracle ${o.tick} dev ${dev} > ${cfg.ORACLE_MAX_DEV_TICKS}` };
       }
-      log(`  oracle ok: pool ${ref} vs oracle ${o.tick} (dev ${dev}, age ${o.ageSecs}s)`);
+      ctx.log(`  oracle ok: pool ${ref} vs oracle ${o.tick} (dev ${dev}, age ${o.ageSecs}s)`);
       return { ok: true, reason: 'ok', twapTick, oraclePrice: o.price, feedHealthy: true };
     } catch (e: any) {
       return { ok: false, feedHealthy: false, twapTick,
@@ -262,11 +291,12 @@ export function compoundAllowed(
  * the mint must consume. Never throws; returns whether a tx landed.
  */
 async function runCompound(
-  ctx: Ctx,
+  ctx: VaultCtx,
   sqrtPriceX96: ethers.BigNumber,
   base: [number, number],
 ): Promise<boolean> {
-  const { cfg, vault, signer } = ctx;
+  const { cfg, vault } = ctx;
+  const { signer } = ctx.chain;
   const [limitLower, limitUpper, [idle0, idle1], slot0] = await Promise.all([
     vault.limitLower(),
     vault.limitUpper(),
@@ -292,7 +322,7 @@ async function runCompound(
   const sweep1 = idle1.add(fees1);
 
   if (sweep0.isZero() && sweep1.isZero()) {
-    log('  compound: nothing to sweep (no idle balance, no fees owed)');
+    ctx.log('  compound: nothing to sweep (no idle balance, no fees owed)');
     return false;
   }
 
@@ -300,10 +330,10 @@ async function runCompound(
   const sqrt = BigInt(sqrtPriceX96.toString());
   const value1 = BigInt(sweep1.toString()) + (BigInt(sweep0.toString()) * sqrt * sqrt) / (1n << 192n);
   if (value1 < BigInt(cfg.compoundMinFees1.toString())) {
-    log(`  compound: ${value1} below COMPOUND_MIN_FEES1 ${cfg.compoundMinFees1.toString()}`);
+    ctx.log(`  compound: ${value1} below COMPOUND_MIN_FEES1 ${cfg.compoundMinFees1.toString()}`);
     return false;
   }
-  log(`  compound: sweeping idle ${idle0}/${idle1} + fees owed ${fees0}/${fees1}`);
+  ctx.log(`  compound: sweeping idle ${idle0}/${idle1} + fees owed ${fees0}/${fees1}`);
 
   // Mins are derived from what the mint will actually consume — idle plus the
   // fees this call is about to collect — so they are never all-zero, which is
@@ -316,7 +346,7 @@ async function runCompound(
     limit: [limitLower, limitUpper],
     toleranceBps: cfg.MINS_TOLERANCE_BPS,
   });
-  log(
+  ctx.log(
     `  compound: sweeping idle ${idle0.toString()}/${idle1.toString()} ` +
       `into base=[${base[0]},${base[1]}] limit=[${limitLower},${limitUpper}] ` +
       `(inMin ${inMin.map((b) => b.toString()).join('/')}, tol ${cfg.MINS_TOLERANCE_BPS}bps)`,
@@ -328,13 +358,24 @@ async function runCompound(
     vault: vault.address,
     inMin,
     gasLimit: cfg.GAS_LIMIT,
-    gasPrice: (await txOverrides(ctx)).gasPrice as ethers.BigNumber,
+    gasPrice: (await txOverrides(ctx.chain)).gasPrice as ethers.BigNumber,
     confirmations: cfg.CONFIRMATIONS,
+    log: ctx.log,
   });
 }
 
-export async function evaluate(ctx: Ctx, blockNumber: number, state: KeeperState): Promise<void> {
-  const { cfg, vault, pool, provider, signer } = ctx;
+/**
+ * One vault, one block. The block is passed in rather than fetched: every vault
+ * in a cycle sees the same header, and re-reading it per vault would be N round
+ * trips for one answer.
+ */
+export async function evaluate(
+  ctx: VaultCtx,
+  blockNumber: number,
+  block: ethers.providers.Block | null,
+): Promise<void> {
+  const { cfg, vault, pool, state } = ctx;
+  const { provider, signer } = ctx.chain;
 
   const { sqrtPriceX96, tick: spotTick } = await readSlot0(pool);
   const [baseLower, baseUpper, limitLower0, limitUpper0, limitPos] = await Promise.all([
@@ -398,7 +439,6 @@ export async function evaluate(ctx: Ctx, blockNumber: number, state: KeeperState
     }
   }
 
-  const block = await provider.getBlock(blockNumber);
   const now = block?.timestamp ?? Math.trunc(Date.now() / 1000);
 
   const compoundDue =
@@ -406,7 +446,7 @@ export async function evaluate(ctx: Ctx, blockNumber: number, state: KeeperState
     !!cfg.ADMIN_ADDRESS &&
     now - state.lastCompoundTs >= cfg.COMPOUND_INTERVAL_SECS;
 
-  log(
+  ctx.log(
     `#${blockNumber} tick=${spotTick} base=[${baseLower},${baseUpper}] ` +
       `${decision.trigger ? 'TRIGGER' : refresh.trigger ? 'REFRESH' : fold.trigger ? 'FOLD' : 'hold'}` +
       `${compoundDue ? ' +compound-due' : ''} — ${
@@ -414,50 +454,17 @@ export async function evaluate(ctx: Ctx, blockNumber: number, state: KeeperState
       }`,
   );
 
-  if (!decision.trigger) state.dwell = 0;
-  if (!refresh.trigger) state.refreshDwell = 0;
-  if (!fold.trigger) state.foldDwell = 0;
-
-  // Dwell: a single-block spike (flash-ish manipulation) cannot fire a rebalance;
-  // the condition must hold across DWELL_BLOCKS consecutive evaluated blocks,
-  // which costs an attacker real capital held against arbitrage. The counter
-  // resets only when the trigger clears — a gate blocking downstream leaves it
-  // armed, since the trigger genuinely did persist. Placement is off the TWAP
-  // regardless, so an armed counter cannot by itself move the band.
-  //
-  // Dwell gates the REBALANCE only. A sweep that is due still runs the gates
-  // below, because its own risk has nothing to do with whether the band moved.
-  let rebalanceArmed = decision.trigger;
-  if (decision.trigger) {
-    state.dwell += 1;
-    if (state.dwell < cfg.DWELL_BLOCKS) {
-      log(`  arming: trigger ${state.dwell}/${cfg.DWELL_BLOCKS} consecutive blocks`);
-      rebalanceArmed = false;
-    }
-  }
-
-  // The refresh shares the dwell discipline: a stranded limit is stranded for
-  // hours, so waiting DWELL_BLOCKS costs nothing and keeps a spot flick from
-  // buying a re-place.
-  let refreshArmed = refresh.trigger;
-  if (refresh.trigger) {
-    state.refreshDwell += 1;
-    if (state.refreshDwell < cfg.DWELL_BLOCKS) {
-      log(`  arming refresh: ${state.refreshDwell}/${cfg.DWELL_BLOCKS} consecutive blocks`);
-      refreshArmed = false;
-    }
-  }
+  // Dwell gates the REBALANCE and the refresh, never the compound: a sweep's
+  // risk has nothing to do with whether the band moved. Placement is off the
+  // TWAP regardless, so an armed counter cannot by itself move the band.  //
+  // The refresh shares the discipline — a stranded limit is stranded for hours,
+  // so waiting costs nothing and keeps a spot flick from buying a re-place.
+  let rebalanceArmed = stepDwell(ctx, 'dwellSince', decision.trigger, now, 'trigger');
+  let refreshArmed = stepDwell(ctx, 'refreshDwellSince', refresh.trigger, now, 'refresh');
 
   // And the fold: composition can only be moved by real trades through the
   // pool, but the dwell still makes a single-block push worthless.
-  let foldArmed = fold.trigger;
-  if (fold.trigger) {
-    state.foldDwell += 1;
-    if (state.foldDwell < cfg.DWELL_BLOCKS) {
-      log(`  arming fold: ${state.foldDwell}/${cfg.DWELL_BLOCKS} consecutive blocks`);
-      foldArmed = false;
-    }
-  }
+  let foldArmed = stepDwell(ctx, 'foldDwellSince', fold.trigger, now, 'fold');
 
   // Cooldown — mirror the on-chain proxy interval (when present) to avoid
   // predictable reverts, and enforce our own floor either way. Checked before
@@ -468,7 +475,7 @@ export async function evaluate(ctx: Ctx, blockNumber: number, state: KeeperState
     const minInterval = Math.max(cfg.MIN_INTERVAL_SECS, caps?.minIntervalSecs ?? 0);
     const lastTs = Math.max(state.lastRebalanceTs, caps?.lastRebalanceTs ?? 0);
     if (lastTs > 0 && now - lastTs < minInterval) {
-      log(`  skip: min interval (${now - lastTs}s < ${minInterval}s)`);
+      ctx.log(`  skip: min interval (${now - lastTs}s < ${minInterval}s)`);
       rebalanceArmed = false;
       refreshArmed = false;
       foldArmed = false;
@@ -490,10 +497,10 @@ export async function evaluate(ctx: Ctx, blockNumber: number, state: KeeperState
     regime = d.regime;
     bandMult = bandMultForRegime(regime, cfg.BASE_HALF_WIDTH_MULT, cfg.ELEVATED_HALF_WIDTH_MULT);
     if (regime === 'elevated') {
-      log(`  regime elevated — widening band to mult ${bandMult} (from ${cfg.BASE_HALF_WIDTH_MULT})`);
+      ctx.log(`  regime elevated — widening band to mult ${bandMult} (from ${cfg.BASE_HALF_WIDTH_MULT})`);
     }
   } else if (!gate.feedHealthy) {
-    log('  oracle unreadable and REGIME_ENABLED=false — refusing both actions');
+    ctx.log('  oracle unreadable and REGIME_ENABLED=false — refusing both actions');
     return;
   }
 
@@ -501,7 +508,7 @@ export async function evaluate(ctx: Ctx, blockNumber: number, state: KeeperState
   if (compoundDue) {
     const allowed = compoundAllowed(gate, regime);
     if (!allowed.run) {
-      log(`  compound skipped: ${allowed.reason}`);
+      ctx.log(`  compound skipped: ${allowed.reason}`);
     } else {
       // Stamped whether or not the tx lands, so a persistently reverting sweep
       // backs off to the interval instead of retrying every block.
@@ -513,8 +520,8 @@ export async function evaluate(ctx: Ctx, blockNumber: number, state: KeeperState
   if (!rebalanceArmed && !refreshArmed && !foldArmed) return;
 
   if (regime === 'extreme') {
-    log(`  skip: regime EXTREME`);
-    log(
+    ctx.log(`  skip: regime EXTREME`);
+    ctx.log(
       '  OPERATOR ACTION: the keeper cannot pull liquidity — Admin.pullLiquidity is\n' +
         '    onlyRebalancer and the RebalanceProxy holds that role. To pull, the Admin\n' +
         '    holder (governance) must: 1) Admin.setRebalancer(vault, <signer>)\n' +
@@ -523,7 +530,7 @@ export async function evaluate(ctx: Ctx, blockNumber: number, state: KeeperState
     return;
   }
   if (!gate.ok) {
-    log(`  skip: ${gate.reason}`);
+    ctx.log(`  skip: ${gate.reason}`);
     return;
   }
 
@@ -533,7 +540,7 @@ export async function evaluate(ctx: Ctx, blockNumber: number, state: KeeperState
 
   const gasBal = await provider.getBalance(signer.address);
   if (gasBal.lt(cfg.gasFloorWei)) {
-    log(`  skip: gas (WETH) balance ${ethers.utils.formatEther(gasBal)} below floor`);
+    ctx.log(`  skip: gas (WETH) balance ${ethers.utils.formatEther(gasBal)} below floor`);
     return;
   }
 
@@ -553,15 +560,15 @@ export async function evaluate(ctx: Ctx, blockNumber: number, state: KeeperState
   if (rebalanceArmed && caps && !caps.exempted) {
     try {
       const c = clampBandTranslation(newBase, [baseLower, baseUpper], caps.maxTranslation, bandMult, ctx.tickSpacing);
-      if (c.clamped) log(`  clamp: walking band toward target within maxTranslation ${caps.maxTranslation}`);
+      if (c.clamped) ctx.log(`  clamp: walking band toward target within maxTranslation ${caps.maxTranslation}`);
       newBase = c.band;
     } catch (e: any) {
-      log(`  skip: ${e?.message ?? e}`);
+      ctx.log(`  skip: ${e?.message ?? e}`);
       return;
     }
     const widthDelta = Math.abs((newBase[1] - newBase[0]) - (baseUpper - baseLower));
     if (widthDelta > caps.maxWidth) {
-      log(`  skip: width delta ${widthDelta} exceeds proxy maxWidth ${caps.maxWidth} — align BASE_HALF_WIDTH_MULT with governance caps`);
+      ctx.log(`  skip: width delta ${widthDelta} exceeds proxy maxWidth ${caps.maxWidth} — align BASE_HALF_WIDTH_MULT with governance caps`);
       return;
     }
   }
@@ -595,27 +602,25 @@ export async function evaluate(ctx: Ctx, blockNumber: number, state: KeeperState
     outMin,
   };
 
-  log(
-    `  plan${rebalanceArmed ? '' : refreshArmed ? ' (limit refresh, base unchanged)' : ' (fold at balance, base unchanged)'}: ` +
-      `base=[${args.baseLower},${args.baseUpper}] limit=[${limitLower},${limitUpper}] surplus=${side} tol=${cfg.MINS_TOLERANCE_BPS}bps`,
+  ctx.log(
+    `  plan${rebalanceArmed ? '' : refreshArmed ? ' (limit refresh, base unchanged)' : ' (fold at balance, base unchanged)'}: ` +      `base=[${args.baseLower},${args.baseUpper}] limit=[${limitLower},${limitUpper}] surplus=${side} tol=${cfg.MINS_TOLERANCE_BPS}bps`,
   );
 
   if (cfg.DRY_RUN) {
-    log('  DRY_RUN: not sending');
+    ctx.log('  DRY_RUN: not sending');
     return;
   }
 
   const pf = await preflight(ctx, args);
   if (!pf.ok) {
-    log(`  skip: preflight revert — ${pf.error}`);
+    ctx.log(`  skip: preflight revert — ${pf.error}`);
     return;
   }
 
-  log(`  submitting rebalance via ${ctx.proxy ? 'RebalanceProxy' : 'Hypervisor (direct)'}…`);
+  ctx.log(`  submitting rebalance via ${ctx.proxy ? 'RebalanceProxy' : 'Hypervisor (direct)'}…`);
   const hash = await submitRebalance(ctx, args);
-  log(`  ✓ ${rebalanceArmed ? 'rebalanced' : refreshArmed ? 'limit refreshed' : 'folded at balance'} — ${hash}`);
+  ctx.log(`  ✓ ${rebalanceArmed ? 'rebalanced' : refreshArmed ? 'limit refreshed' : 'folded at balance'} — ${hash}`);
   state.lastRebalanceTs = now;
-  state.dwell = 0;
-  state.refreshDwell = 0;
-  state.foldDwell = 0;
-}
+  state.dwellSince = 0;
+  state.refreshDwellSince = 0;
+  state.foldDwellSince = 0;}

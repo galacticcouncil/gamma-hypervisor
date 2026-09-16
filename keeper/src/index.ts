@@ -1,76 +1,118 @@
 import { ethers } from 'ethers';
-import { loadConfig } from './config';
-import { createContext, readProxyCaps, type Ctx } from './chain';
-import { startKeeper } from './keeper';
+import { loadKeeperConfig, resolveDwellSecs, type GlobalConfig } from './config';
+import {
+  createChain,
+  createVaultContext,
+  disambiguateTags,
+  measureBlockTimeSecs,
+  readProxyCaps,
+  type VaultCtx,
+} from './chain';
+import { initialState, startKeeper } from './keeper';
 import { log } from './log';
 
 async function main(): Promise<void> {
-  const cfg = loadConfig();
-  const ctx = await createContext(cfg);
+  // A config error is fatal for the whole process, by design: it is operator
+  // error, and half a keeper is worse than none. Runtime errors are the
+  // opposite — per vault and non-fatal (see startKeeper).
+  const { global, vaults: cfgs } = loadKeeperConfig();
+  const chain = createChain(global);
 
+  // Measured once, shared: only used to translate the deprecated DWELL_BLOCKS.
+  const blockTimeSecs = await measureBlockTimeSecs(chain.provider);
+
+  globalBanner(global, cfgs.length, blockTimeSecs);
+
+  const vaults: VaultCtx[] = [];
+  for (const cfg of cfgs) vaults.push(await createVaultContext(chain, cfg, blockTimeSecs));
+  disambiguateTags(vaults);
+
+  for (const v of vaults) {
+    vaultBanner(v, blockTimeSecs);
+    await validateRoles(v);
+    v.state = await initialState(v);
+  }
+
+  await startKeeper(chain, vaults);
+}
+
+function globalBanner(cfg: GlobalConfig, vaultCount: number, blockTimeSecs: number): void {
+  log(`Gamma keeper — ${vaultCount} vault${vaultCount === 1 ? '' : 's'}, one signer, one nonce`);
+  log(`  rpc          ${cfg.RPC_URL}  (~${blockTimeSecs.toFixed(2)}s/block)`);
+  log(`  gas          limit ${cfg.GAS_LIMIT}, +${cfg.GAS_PRICE_MARKUP_PCT}% over eth_gasPrice, floor ${cfg.GAS_FLOOR_WEI} wei`);
+  log(`  tx           ${cfg.CONFIRMATIONS} confirmations, poll ${cfg.POLL_INTERVAL_MS}ms, lookback ${cfg.STARTUP_LOOKBACK_BLOCKS} blocks`);
+  log(`  indexer      ${cfg.INDEXER_URL ?? 'off'}`);
+  log(`  mode         ${cfg.DRY_RUN ? 'DRY_RUN (no tx)' : 'LIVE'}`);
+}
+
+// Per vault, because with several of them the interleaved per-block output is
+// only readable if the reader already knows what each tag was configured with.
+function vaultBanner(ctx: VaultCtx, blockTimeSecs: number): void {
+  const { cfg } = ctx;
   const model = cfg.ENTRYPOINT === 'proxy' ? 'Model B (RebalanceProxy — bounded rebalancer key)' : 'Model A (signs as vault owner)';
-  log(`Gamma keeper — ${model}`);
-  log(`  rpc          ${cfg.RPC_URL}`);
-  log(`  vault        ${cfg.VAULT}`);
-  log(`  pool         ${ctx.pool.address}  (${ctx.symbol0}/${ctx.symbol1}, spacing ${ctx.tickSpacing})`);
-  log(`  signer       ${ctx.signer.address}`);
-  log(`  vault.owner  ${ctx.owner}`);
-  log(`  feeRecipient ${ctx.feeRecipient}`);
-  log(`  strategy     base ±${cfg.BASE_HALF_WIDTH_MULT}×spacing, trigger >${cfg.REBALANCE_THRESHOLD_MULT}×spacing, limit ${cfg.LIMIT_WIDTH_MULT}×spacing`);
-  log(
+  const dwell = resolveDwellSecs(cfg, blockTimeSecs);
+
+  ctx.log(`vault        ${cfg.VAULT} — ${model}`);
+  ctx.log(`  pool         ${ctx.pool.address}  (${ctx.symbol0}/${ctx.symbol1}, spacing ${ctx.tickSpacing})`);
+  ctx.log(`  signer       ${ctx.chain.signer.address}`);
+  ctx.log(`  vault.owner  ${ctx.owner}`);
+  ctx.log(`  feeRecipient ${ctx.feeRecipient}`);
+  ctx.log(`  strategy     base ±${cfg.BASE_HALF_WIDTH_MULT}×spacing, trigger >${cfg.REBALANCE_THRESHOLD_MULT}×spacing, limit ${cfg.LIMIT_WIDTH_MULT}×spacing`);
+  ctx.log(
     `  fold         ${
       cfg.FOLD_ENABLED
         ? `ON — bank a >=${(cfg.FOLD_MIN_SHARE * 100).toFixed(0)}% mixed limit into the base (limit >= ${(cfg.FOLD_MIN_LIMIT_SHARE * 100).toFixed(0)}% of NAV)`
         : 'off — a traversed limit is only re-placed by refresh/re-center'
     }`,
   );
-  log(`  gates        twap ${cfg.TWAP_ENABLED ? `on (${cfg.TWAP_WINDOW_SECS}s, maxDev ${cfg.MAX_DEV_TICKS})` : 'OFF'}, dwell ${cfg.DWELL_BLOCKS} blocks, minInterval ${cfg.MIN_INTERVAL_SECS}s`);
-  log(`  oracle       ${cfg.ORACLE_ENABLED ? `${cfg.ORACLE_FEED0}${cfg.ORACLE_FEED1 ? ` / ${cfg.ORACLE_FEED1}` : ' (token1 = USD side)'} (maxDev ${cfg.ORACLE_MAX_DEV_TICKS}, maxAge ${cfg.ORACLE_MAX_AGE_SECS}s)` : 'off'}`);
-  log(`  mins         ${cfg.MINS_TOLERANCE_BPS} bps tolerance`);
-  log(`  compound     ${cfg.COMPOUND_ENABLED ? `every ${cfg.COMPOUND_INTERVAL_SECS}s via Admin ${cfg.ADMIN_ADDRESS}, bounded` : 'off'}`);
-  log(`  mode         ${cfg.DRY_RUN ? 'DRY_RUN (no tx)' : 'LIVE'}`);
+  ctx.log(`  gates        twap ${cfg.TWAP_ENABLED ? `on (${cfg.TWAP_WINDOW_SECS}s, maxDev ${cfg.MAX_DEV_TICKS})` : 'OFF'}, dwell ${dwell.secs}s, minInterval ${cfg.MIN_INTERVAL_SECS}s`);
+  ctx.log(`  oracle       ${cfg.ORACLE_ENABLED ? `${cfg.ORACLE_FEED0}${cfg.ORACLE_FEED1 ? ` / ${cfg.ORACLE_FEED1}` : ' (token1 = USD side)'} (maxDev ${cfg.ORACLE_MAX_DEV_TICKS}, maxAge ${cfg.ORACLE_MAX_AGE_SECS}s)` : 'off'}`);
+  ctx.log(`  mins         ${cfg.MINS_TOLERANCE_BPS} bps tolerance`);
+  ctx.log(`  compound     ${cfg.COMPOUND_ENABLED ? `every ${cfg.COMPOUND_INTERVAL_SECS}s via Admin ${cfg.ADMIN_ADDRESS}, bounded` : 'off'}`);
 
-  await validateRoles(ctx);
-
+  // Loud on purpose. DWELL_BLOCKS silently meant a different length of time
+  // every time the chain's block time or the keeper's cycle cost changed.
+  if (dwell.derived) {
+    ctx.log(`  ⚠ dwell      ${dwell.note}`);
+  }
   if (!cfg.TWAP_ENABLED) {
-    log('  ⚠ TWAP gate OFF — the band follows raw spot. Local/throwaway chains only.');
+    ctx.log('  ⚠ TWAP gate OFF — the band follows raw spot. Local/throwaway chains only.');
   }
   if (!cfg.ORACLE_ENABLED) {
-    log('  ⚠ external oracle clamp OFF — the pool is its own only price reference.');
+    ctx.log('  ⚠ external oracle clamp OFF — the pool is its own only price reference.');
   }
   if (cfg.COMPOUND_ENABLED && cfg.COMPOUND_INTERVAL_SECS > 3600) {
-    log(
+    ctx.log(
       `  ⚠ COMPOUND_INTERVAL_SECS=${cfg.COMPOUND_INTERVAL_SECS} is long. Each sweep tips the whole\n` +
         '    idle balance into the pool at once, and what a sandwich can extract scales with\n' +
         '    that pile. Prefer minutes.',
     );
   }
-
-  await startKeeper(ctx);
 }
 
 // Fail fast on a misconfigured access model: a keeper that can never land a tx
-// should say so at startup, not silently log preflight reverts forever.
-async function validateRoles(ctx: Ctx): Promise<void> {
-  const signer = ctx.signer.address.toLowerCase();
+// should say so at startup, not silently log preflight reverts forever. Runs
+// per vault — one vault's broken roles say nothing about the others'.
+async function validateRoles(ctx: VaultCtx): Promise<void> {
+  const signer = ctx.chain.signer.address.toLowerCase();
   if (ctx.proxy) {
     const [rebalancer, admin] = await Promise.all([
       ctx.proxy.rebalancers(ctx.vault.address),
       ctx.proxy.admins(ctx.vault.address),
     ]);
     const caps = await readProxyCaps(ctx.proxy, ctx.vault.address);
-    log(`  proxy        ${ctx.proxy.address}`);
-    log(`  proxy caps   maxTranslation ${caps.maxTranslation}, maxWidth ${caps.maxWidth}, minInterval ${caps.minIntervalSecs}s${caps.exempted ? ' (vault EXEMPTED — caps not enforced)' : ''}`);
+    ctx.log(`  proxy        ${ctx.proxy.address}`);
+    ctx.log(`  proxy caps   maxTranslation ${caps.maxTranslation}, maxWidth ${caps.maxWidth}, minInterval ${caps.minIntervalSecs}s${caps.exempted ? ' (vault EXEMPTED — caps not enforced)' : ''}`);
     if (rebalancer.toLowerCase() !== signer) {
-      log(`  ⚠ signer is NOT the proxy's rebalancer for this vault (${rebalancer}) — every call will revert "only rebalancer".`);
+      ctx.log(`  ⚠ signer is NOT the proxy's rebalancer for this vault (${rebalancer}) — every call will revert "only rebalancer".`);
     }
     if (admin === ethers.constants.AddressZero) {
-      log('  ⚠ no Admin set on the proxy for this vault — RebalanceProxy.rebalance will revert.');
+      ctx.log('  ⚠ no Admin set on the proxy for this vault — RebalanceProxy.rebalance will revert.');
     } else if (admin.toLowerCase() !== ctx.owner.toLowerCase()) {
-      log(`  ⚠ vault.owner (${ctx.owner}) is not the proxy's Admin (${admin}) — the Admin must own the vault.`);
+      ctx.log(`  ⚠ vault.owner (${ctx.owner}) is not the proxy's Admin (${admin}) — the Admin must own the vault.`);
     }
     if (caps.exempted) {
-      log('  ⚠ vault is exempted on the proxy: translation/width caps are NOT enforced on-chain.');
+      ctx.log('  ⚠ vault is exempted on the proxy: translation/width caps are NOT enforced on-chain.');
     }
 
     // A configured band width the proxy's maxWidth can never accept would make
@@ -82,19 +124,19 @@ async function validateRoles(ctx: Ctx): Promise<void> {
       const targetWidth = 2 * ctx.cfg.BASE_HALF_WIDTH_MULT * ctx.tickSpacing + ctx.tickSpacing;
       const delta = Math.abs(targetWidth - currentWidth);
       if (delta > caps.maxWidth) {
-        log(
+        ctx.log(
           `  ⚠ DEADLOCK: band width ${currentWidth} -> ${targetWidth} is a change of ${delta}, ` +
             `over the proxy's maxWidth ${caps.maxWidth}. Every rebalance will be skipped.`,
         );
-        log(
+        ctx.log(
           `    Fix: set BASE_HALF_WIDTH_MULT to ~${Math.round((currentWidth - ctx.tickSpacing) / (2 * ctx.tickSpacing))}, ` +
             `or have governance raise maxWidth to >= ${delta} (RebalanceProxy.setCustomDiffWidth).`,
         );
       }
     }
   } else if (ctx.owner.toLowerCase() !== signer) {
-    log('  ⚠ signer is NOT the vault owner — rebalance() is onlyOwner and will revert.');
-    log('    Set PRIVATE_KEY to the owner key, or transferOwnership() to the signer.');
+    ctx.log('  ⚠ signer is NOT the vault owner — rebalance() is onlyOwner and will revert.');
+    ctx.log('    Set PRIVATE_KEY to the owner key, or transferOwnership() to the signer.');
   }
 }
 
