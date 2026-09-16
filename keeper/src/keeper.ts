@@ -1,13 +1,13 @@
 import { ethers } from 'ethers';
 import type { Ctx, ProxyCaps } from './chain';
 import { readLastRebalanceTs, readProxyCaps } from './chain';
-import { shouldRebalance, shouldRefreshLimit } from './decide';
+import { shouldFold, shouldRebalance, shouldRefreshLimit, type Trigger } from './decide';
 import { centeredBand, clampBandTranslation, clampBandWidth, limitRange, skewedBand } from './ticks';
 import { oldestObservationAgeSecs, readSlot0, readTwapTick } from './pool';
 import { readIdleBalances, readPositions, readTotalAmounts, surplusSide } from './vault';
 import { computeCompoundMins, computeMins, splitForBand } from './mins';
 import { readOracleTick } from './oracle';
-import { sqrtPriceFromTick, toFloat } from './price';
+import { priceFromSqrtX96, sqrtPriceFromTick, toFloat } from './price';
 import { preflight, type RebalanceArgs } from './preflight';
 import { txOverrides } from './chain';
 import { submitRebalance } from './submit';
@@ -25,6 +25,8 @@ export interface KeeperState {
   dwell: number;
   /** Same, for the limit-refresh trigger. */
   refreshDwell: number;
+  /** Same, for the fold-at-balance trigger. */
+  foldDwell: number;
   /** Volatility regime, and when it was entered. */
   regime: RegimeState;
   /** Feed price trail, for the "moved X% in Y minutes" checks. */
@@ -41,6 +43,7 @@ export async function initialState(ctx: Ctx): Promise<KeeperState> {
     lastRebalanceTs,
     dwell: 0,
     refreshDwell: 0,
+    foldDwell: 0,
     // Start calm rather than extreme: the first evaluation re-derives it from
     // live inputs anyway, and booting into `extreme` would impose the full
     // re-entry wait on every restart.
@@ -367,6 +370,26 @@ export async function evaluate(ctx: Ctx, blockNumber: number, state: KeeperState
         })
       : { trigger: false, reason: 'refresh disabled, no base, or drift trigger active' };
 
+  // Fold at balance: a limit price has traded halfway through holds a
+  // conversion the vault has been paid for but not banked — bank it with the
+  // same zero-translation rebalance a refresh uses, before the second half
+  // converts too and the position reflects. Subordinate to both triggers above
+  // (a re-center or refresh re-places the limit anyway). NAV is read only when
+  // the trigger might actually fire, so the common block costs no extra call.
+  let fold: Trigger = { trigger: false, reason: 'fold disabled or superseded' };
+  if (cfg.FOLD_ENABLED && baseUpper > baseLower && !decision.trigger && !refresh.trigger) {
+    const spotPrice = priceFromSqrtX96(sqrtPriceX96);
+    const [t0, t1] = await readTotalAmounts(vault);
+    fold = shouldFold({
+      limitValue0: toFloat(limitPos.amount0) * spotPrice,
+      limitValue1: toFloat(limitPos.amount1),
+      limitLiquidity: BigInt(limitPos.liquidity.toString()),
+      navValue: toFloat(t0) * spotPrice + toFloat(t1),
+      foldMinShare: cfg.FOLD_MIN_SHARE,
+      foldMinLimitShare: cfg.FOLD_MIN_LIMIT_SHARE,
+    });
+  }
+
   const block = await provider.getBlock(blockNumber);
   const now = block?.timestamp ?? Math.trunc(Date.now() / 1000);
 
@@ -377,12 +400,15 @@ export async function evaluate(ctx: Ctx, blockNumber: number, state: KeeperState
 
   log(
     `#${blockNumber} tick=${spotTick} base=[${baseLower},${baseUpper}] ` +
-      `${decision.trigger ? 'TRIGGER' : refresh.trigger ? 'REFRESH' : 'hold'}` +
-      `${compoundDue ? ' +compound-due' : ''} — ${decision.trigger || !refresh.trigger ? decision.reason : refresh.reason}`,
+      `${decision.trigger ? 'TRIGGER' : refresh.trigger ? 'REFRESH' : fold.trigger ? 'FOLD' : 'hold'}` +
+      `${compoundDue ? ' +compound-due' : ''} — ${
+        decision.trigger ? decision.reason : refresh.trigger ? refresh.reason : fold.trigger ? fold.reason : decision.reason
+      }`,
   );
 
   if (!decision.trigger) state.dwell = 0;
   if (!refresh.trigger) state.refreshDwell = 0;
+  if (!fold.trigger) state.foldDwell = 0;
 
   // Dwell: a single-block spike (flash-ish manipulation) cannot fire a rebalance;
   // the condition must hold across DWELL_BLOCKS consecutive evaluated blocks,
@@ -414,11 +440,22 @@ export async function evaluate(ctx: Ctx, blockNumber: number, state: KeeperState
     }
   }
 
+  // And the fold: composition can only be moved by real trades through the
+  // pool, but the dwell still makes a single-block push worthless.
+  let foldArmed = fold.trigger;
+  if (fold.trigger) {
+    state.foldDwell += 1;
+    if (state.foldDwell < cfg.DWELL_BLOCKS) {
+      log(`  arming fold: ${state.foldDwell}/${cfg.DWELL_BLOCKS} consecutive blocks`);
+      foldArmed = false;
+    }
+  }
+
   // Cooldown — mirror the on-chain proxy interval (when present) to avoid
   // predictable reverts, and enforce our own floor either way. Checked before
   // the price gates so a cooled-down keeper does not pay for their RPC calls.
   let caps: ProxyCaps | undefined;
-  if (rebalanceArmed || refreshArmed) {
+  if (rebalanceArmed || refreshArmed || foldArmed) {
     caps = ctx.proxy ? await readProxyCaps(ctx.proxy, vault.address) : undefined;
     const minInterval = Math.max(cfg.MIN_INTERVAL_SECS, caps?.minIntervalSecs ?? 0);
     const lastTs = Math.max(state.lastRebalanceTs, caps?.lastRebalanceTs ?? 0);
@@ -426,10 +463,11 @@ export async function evaluate(ctx: Ctx, blockNumber: number, state: KeeperState
       log(`  skip: min interval (${now - lastTs}s < ${minInterval}s)`);
       rebalanceArmed = false;
       refreshArmed = false;
+      foldArmed = false;
     }
   }
 
-  if (!rebalanceArmed && !refreshArmed && !compoundDue) return;
+  if (!rebalanceArmed && !refreshArmed && !foldArmed && !compoundDue) return;
 
   // --- price gates, shared by both actions -------------------------------
   const gate = await checkPrice(ctx, spotTick, now);
@@ -464,7 +502,7 @@ export async function evaluate(ctx: Ctx, blockNumber: number, state: KeeperState
     }
   }
 
-  if (!rebalanceArmed && !refreshArmed) return;
+  if (!rebalanceArmed && !refreshArmed && !foldArmed) return;
 
   if (regime === 'extreme') {
     log(`  skip: regime EXTREME`);
@@ -510,10 +548,13 @@ export async function evaluate(ctx: Ctx, blockNumber: number, state: KeeperState
   // one-sided limit. In proxy mode, walk toward it within the on-chain width and
   // translation caps.
   //
-  // A refresh keeps the base EXACTLY as it is: zero translation and zero width
-  // change satisfy the proxy caps by construction, and the whole point is to
-  // re-place only the limit. (When both triggers armed on the same block the
-  // re-center wins — it re-places the limit anyway.)
+  // A refresh — and a fold, which is the same action fired on the limit's
+  // composition instead of its geometry — keeps the base EXACTLY as it is:
+  // zero translation and zero width change satisfy the proxy caps by
+  // construction. The fold's work happens in the re-mint itself: the base mint
+  // is scarce-side constrained, so the now-pairable inventory lands in the base
+  // and only the residual re-parks one-sided. (When several triggers arm on the
+  // same block the re-center wins — it re-places the limit anyway.)
   let newBase: [number, number] = rebalanceArmed
     ? cfg.BASE_SKEW_ENABLED
       ? skewedBand(placementTick, share0, bandMult, ctx.tickSpacing, {
@@ -580,7 +621,7 @@ export async function evaluate(ctx: Ctx, blockNumber: number, state: KeeperState
         `${(upperLeg / Math.max(1, lowerLeg)).toFixed(2)}:1)`
       : '';
   log(
-    `  plan${rebalanceArmed ? '' : ' (limit refresh, base unchanged)'}: ` +
+    `  plan${rebalanceArmed ? '' : refreshArmed ? ' (limit refresh, base unchanged)' : ' (fold at balance, base unchanged)'}: ` +
       `base=[${args.baseLower},${args.baseUpper}]${skewNote} limit=[${limitLower},${limitUpper}] ` +
       `surplus=${side} tol=${cfg.MINS_TOLERANCE_BPS}bps`,
   );
@@ -598,8 +639,9 @@ export async function evaluate(ctx: Ctx, blockNumber: number, state: KeeperState
 
   log(`  submitting rebalance via ${ctx.proxy ? 'RebalanceProxy' : 'Hypervisor (direct)'}…`);
   const hash = await submitRebalance(ctx, args);
-  log(`  ✓ ${rebalanceArmed ? 'rebalanced' : 'limit refreshed'} — ${hash}`);
+  log(`  ✓ ${rebalanceArmed ? 'rebalanced' : refreshArmed ? 'limit refreshed' : 'folded at balance'} — ${hash}`);
   state.lastRebalanceTs = now;
   state.dwell = 0;
   state.refreshDwell = 0;
+  state.foldDwell = 0;
 }

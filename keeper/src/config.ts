@@ -76,6 +76,28 @@ const Env = z
     LIMIT_REFRESH_ENABLED: boolEnv(true),
     LIMIT_REFRESH_TICKS: z.coerce.number().int().positive().default(120),
 
+    // --- fold at balance ---
+    // A limit order price has traded halfway through is a conversion the vault
+    // has been paid for but not banked: left alone the second half converts too
+    // and the position REFLECTS to 100% the other token (the flip-flop). Once
+    // the limit's composition reaches FOLD_MIN_SHARE mixed, fire the same
+    // zero-translation rebalance as a limit refresh — base ticks unchanged —
+    // so the burn-and-remint folds the now-pairable inventory into the base
+    // and re-parks only the residual one-sided. Backtested on three real DIA
+    // tapes (30d whipsaw / 90d bear / launch tape): +0.7 / +1.2 / +2.2 pp vs
+    // the recenter+refresh baseline, the only variant that won all three.
+    //
+    // OPT-IN like BASE_SKEW: default false so merging cannot change the running
+    // mainnet deployment; enabled per deployment in the stack config.
+    FOLD_ENABLED: boolEnv(false),
+    // Min-leg share of the LIMIT's own value that counts as "at balance".
+    // 0.4 = fold once the limit is at least 40/60 mixed (the backtested value).
+    FOLD_MIN_SHARE: z.coerce.number().min(0.05).max(0.5).default(0.4),
+    // Ignore limits worth under this fraction of NAV: folding shares the 6h
+    // rebalance cooldown, and a dust-sized fold wastes the slot. The backtests
+    // ran without this floor; it only suppresses economically irrelevant folds.
+    FOLD_MIN_LIMIT_SHARE: z.coerce.number().min(0).max(1).default(0.05),
+
     // Slippage bounds on the rebalance burn/mint legs, in bps of the expected
     // amount. COUPLED TO BASE_HALF_WIDTH_MULT: a position's composition swings
     // from all-token0 to all-token1 across the band, so the legs move roughly

@@ -24,6 +24,13 @@ async function main(): Promise<void> {
         : 'off — symmetric base, the whole surplus goes to the one-sided limit'
     }`,
   );
+  log(
+    `  fold         ${
+      cfg.FOLD_ENABLED
+        ? `ON — bank a >=${(cfg.FOLD_MIN_SHARE * 100).toFixed(0)}% mixed limit into the base (limit >= ${(cfg.FOLD_MIN_LIMIT_SHARE * 100).toFixed(0)}% of NAV)`
+        : 'off — a traversed limit is only re-placed by refresh/re-center'
+    }`,
+  );
   log(`  gates        twap ${cfg.TWAP_ENABLED ? `on (${cfg.TWAP_WINDOW_SECS}s, maxDev ${cfg.MAX_DEV_TICKS})` : 'OFF'}, dwell ${cfg.DWELL_BLOCKS} blocks, minInterval ${cfg.MIN_INTERVAL_SECS}s`);
   log(`  oracle       ${cfg.ORACLE_ENABLED ? `${cfg.ORACLE_FEED0}${cfg.ORACLE_FEED1 ? ` / ${cfg.ORACLE_FEED1}` : ' (token1 = USD side)'} (maxDev ${cfg.ORACLE_MAX_DEV_TICKS}, maxAge ${cfg.ORACLE_MAX_AGE_SECS}s)` : 'off'}`);
   log(`  mins         ${cfg.MINS_TOLERANCE_BPS} bps tolerance`);
