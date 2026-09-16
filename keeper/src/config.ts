@@ -46,6 +46,28 @@ const Env = z
     // Escape hatch for throwaway local chains ONLY: run live without a TWAP gate.
     ALLOW_UNSAFE_SPOT: boolEnv(false),
 
+    // --- inventory-skewed base band ---
+    // A symmetric base wants a 50/50 split by value, so everything the vault
+    // holds beyond that is dumped into the strictly one-sided limit: at token0
+    // share X the limit carries 2X−1 of NAV — measured 81% of the vault in one
+    // order at X=0.905 (base $90, limit $4152). That is TWICE what must be sold
+    // to reach 50/50, so a full traversal does not settle there, it REFLECTS
+    // X → (1−X). Skewing the base instead keeps spot inside the quoted range
+    // and converts gradually, with no completion point to overshoot.
+    //
+    // OPT-IN: default false, so merging this cannot change the behaviour of the
+    // running mainnet deployment. It is switched on deliberately, per deployment.
+    BASE_SKEW_ENABLED: boolEnv(false),
+    // Floor on EACH leg, in multiples of tickSpacing. 8×60 = 480 ticks ≈ −4.7%
+    // on the downside leg, chosen so the lower side keeps meaningful coverage:
+    // a collapsed lower leg is zero depth below spot, and ClearingV2 then
+    // rejects every deposit with "price out of base range".
+    BASE_SKEW_MIN_LEG_MULT: z.coerce.number().int().positive().default(8),
+    // Cap on the token0:token1 value ratio the band is asked to carry, so an
+    // extreme inventory cannot produce a degenerate band. At the default width
+    // the leg floor binds first; this is the backstop for the wide regimes.
+    BASE_SKEW_MAX_RATIO: z.coerce.number().positive().default(8),
+
     // --- limit refresh ---
     // Re-place a stranded limit order next to the price without moving the base
     // band (zero translation/width, so the RebalanceProxy caps are trivially

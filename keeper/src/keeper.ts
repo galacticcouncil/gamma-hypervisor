@@ -2,12 +2,12 @@ import { ethers } from 'ethers';
 import type { Ctx, ProxyCaps } from './chain';
 import { readLastRebalanceTs, readProxyCaps } from './chain';
 import { shouldRebalance, shouldRefreshLimit } from './decide';
-import { centeredBand, clampBandTranslation, limitRange } from './ticks';
+import { centeredBand, clampBandTranslation, clampBandWidth, limitRange, skewedBand } from './ticks';
 import { oldestObservationAgeSecs, readSlot0, readTwapTick } from './pool';
 import { readIdleBalances, readPositions, readTotalAmounts, surplusSide } from './vault';
 import { computeCompoundMins, computeMins, splitForBand } from './mins';
 import { readOracleTick } from './oracle';
-import { sqrtPriceFromTick } from './price';
+import { sqrtPriceFromTick, toFloat } from './price';
 import { preflight, type RebalanceArgs } from './preflight';
 import { txOverrides } from './chain';
 import { submitRebalance } from './submit';
@@ -491,28 +491,54 @@ export async function evaluate(ctx: Ctx, blockNumber: number, state: KeeperState
     return;
   }
 
-  // New base band, centered on the placement tick; in proxy mode, walk toward it
-  // within the on-chain translation cap and respect the width cap.
+  // Inventory, read BEFORE the band is chosen because with BASE_SKEW_ENABLED it
+  // decides the band's SHAPE. (It used to be read afterwards, when it only fed
+  // the split and the mins.)
+  //
+  // Valued at the PLACEMENT price, never raw spot: placement stays off the TWAP
+  // by design, so a pushed spot must not be able to dictate the skew any more
+  // than it can dictate the centre.
+  const [total0, total1] = await readTotalAmounts(vault);
+  const placementPrice = Math.pow(sqrtPriceFromTick(placementTick), 2);
+  const value0 = toFloat(total0) * placementPrice;
+  const nav = value0 + toFloat(total1);
+  // An empty vault has no inventory to express; 0.5 is the symmetric identity.
+  const share0 = nav > 0 ? value0 / nav : 0.5;
+
+  // New base band on the placement tick — symmetric, or skewed by the inventory
+  // so the base itself carries the imbalance instead of handing it all to the
+  // one-sided limit. In proxy mode, walk toward it within the on-chain width and
+  // translation caps.
   //
   // A refresh keeps the base EXACTLY as it is: zero translation and zero width
   // change satisfy the proxy caps by construction, and the whole point is to
   // re-place only the limit. (When both triggers armed on the same block the
   // re-center wins — it re-places the limit anyway.)
   let newBase: [number, number] = rebalanceArmed
-    ? centeredBand(placementTick, bandMult, ctx.tickSpacing)
+    ? cfg.BASE_SKEW_ENABLED
+      ? skewedBand(placementTick, share0, bandMult, ctx.tickSpacing, {
+          minLegTicks: cfg.BASE_SKEW_MIN_LEG_MULT * ctx.tickSpacing,
+          maxSkewRatio: cfg.BASE_SKEW_MAX_RATIO,
+        })
+      : centeredBand(placementTick, bandMult, ctx.tickSpacing)
     : [Number(baseLower), Number(baseUpper)];
   if (rebalanceArmed && caps && !caps.exempted) {
     try {
-      const c = clampBandTranslation(newBase, [baseLower, baseUpper], caps.maxTranslation, bandMult, ctx.tickSpacing);
+      // Width first, translation second: the width step nudges the midpoint by
+      // under a spacing, and the translation clamp — which shifts rigidly, so it
+      // cannot undo the width step — has the last word on the midpoint.
+      const w = clampBandWidth(newBase, [baseLower, baseUpper], placementTick, caps.maxWidth, ctx.tickSpacing);
+      if (w.clamped) {
+        log(
+          `  clamp: walking band width ${baseUpper - baseLower} -> ${w.band[1] - w.band[0]} ` +
+            `(target ${newBase[1] - newBase[0]}) within maxWidth ${caps.maxWidth}`,
+        );
+      }
+      const c = clampBandTranslation(w.band, [baseLower, baseUpper], caps.maxTranslation, ctx.tickSpacing);
       if (c.clamped) log(`  clamp: walking band toward target within maxTranslation ${caps.maxTranslation}`);
       newBase = c.band;
     } catch (e: any) {
       log(`  skip: ${e?.message ?? e}`);
-      return;
-    }
-    const widthDelta = Math.abs((newBase[1] - newBase[0]) - (baseUpper - baseLower));
-    if (widthDelta > caps.maxWidth) {
-      log(`  skip: width delta ${widthDelta} exceeds proxy maxWidth ${caps.maxWidth} — align BASE_HALF_WIDTH_MULT with governance caps`);
       return;
     }
   }
@@ -521,10 +547,8 @@ export async function evaluate(ctx: Ctx, blockNumber: number, state: KeeperState
   // limit range parks, so the same split drives both the side choice and the
   // mint bounds. Side is valued at the placement price (economics); the limit
   // geometry is off spot so the range is strictly one-sided at execution.
-  const [total0, total1] = await readTotalAmounts(vault);
   const positions = await readPositions(vault);
   const split = splitForBand(total0, total1, sqrtPriceX96, newBase);
-  const placementPrice = Math.pow(sqrtPriceFromTick(placementTick), 2);
   const side = surplusSide(split, placementPrice);
   const [limitLower, limitUpper] = limitRange(spotTick, ctx.tickSpacing, side, cfg.LIMIT_WIDTH_MULT);
 
@@ -546,9 +570,19 @@ export async function evaluate(ctx: Ctx, blockNumber: number, state: KeeperState
     outMin,
   };
 
+  // The band's asymmetry is the whole record of why it was placed there, so the
+  // legs and the inventory that produced them go on the plan line.
+  const lowerLeg = placementTick - args.baseLower;
+  const upperLeg = args.baseUpper - placementTick;
+  const skewNote =
+    rebalanceArmed && cfg.BASE_SKEW_ENABLED
+      ? ` skew=(share0 ${(share0 * 100).toFixed(1)}%, legs −${lowerLeg}/+${upperLeg}, ` +
+        `${(upperLeg / Math.max(1, lowerLeg)).toFixed(2)}:1)`
+      : '';
   log(
     `  plan${rebalanceArmed ? '' : ' (limit refresh, base unchanged)'}: ` +
-      `base=[${args.baseLower},${args.baseUpper}] limit=[${limitLower},${limitUpper}] surplus=${side} tol=${cfg.MINS_TOLERANCE_BPS}bps`,
+      `base=[${args.baseLower},${args.baseUpper}]${skewNote} limit=[${limitLower},${limitUpper}] ` +
+      `surplus=${side} tol=${cfg.MINS_TOLERANCE_BPS}bps`,
   );
 
   if (cfg.DRY_RUN) {

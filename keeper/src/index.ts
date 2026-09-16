@@ -17,6 +17,13 @@ async function main(): Promise<void> {
   log(`  vault.owner  ${ctx.owner}`);
   log(`  feeRecipient ${ctx.feeRecipient}`);
   log(`  strategy     base ±${cfg.BASE_HALF_WIDTH_MULT}×spacing, trigger >${cfg.REBALANCE_THRESHOLD_MULT}×spacing, limit ${cfg.LIMIT_WIDTH_MULT}×spacing`);
+  log(
+    `  base skew    ${
+      cfg.BASE_SKEW_ENABLED
+        ? `ON — band rotated by inventory (min leg ${cfg.BASE_SKEW_MIN_LEG_MULT}×spacing, max ratio ${cfg.BASE_SKEW_MAX_RATIO}:1, total width unchanged)`
+        : 'off — symmetric base, the whole surplus goes to the one-sided limit'
+    }`,
+  );
   log(`  gates        twap ${cfg.TWAP_ENABLED ? `on (${cfg.TWAP_WINDOW_SECS}s, maxDev ${cfg.MAX_DEV_TICKS})` : 'OFF'}, dwell ${cfg.DWELL_BLOCKS} blocks, minInterval ${cfg.MIN_INTERVAL_SECS}s`);
   log(`  oracle       ${cfg.ORACLE_ENABLED ? `${cfg.ORACLE_FEED0}${cfg.ORACLE_FEED1 ? ` / ${cfg.ORACLE_FEED1}` : ' (token1 = USD side)'} (maxDev ${cfg.ORACLE_MAX_DEV_TICKS}, maxAge ${cfg.ORACLE_MAX_AGE_SECS}s)` : 'off'}`);
   log(`  mins         ${cfg.MINS_TOLERANCE_BPS} bps tolerance`);
@@ -30,6 +37,15 @@ async function main(): Promise<void> {
   }
   if (!cfg.ORACLE_ENABLED) {
     log('  ⚠ external oracle clamp OFF — the pool is its own only price reference.');
+  }
+  // A leg floor at or above the half-width leaves both legs on the floor, so the
+  // band can never rotate and the feature is silently a no-op. Say so.
+  if (cfg.BASE_SKEW_ENABLED && cfg.BASE_SKEW_MIN_LEG_MULT >= cfg.BASE_HALF_WIDTH_MULT) {
+    log(
+      `  ⚠ BASE_SKEW_ENABLED but BASE_SKEW_MIN_LEG_MULT=${cfg.BASE_SKEW_MIN_LEG_MULT} is not under\n` +
+        `    BASE_HALF_WIDTH_MULT=${cfg.BASE_HALF_WIDTH_MULT}: both legs sit on the floor, so every band\n` +
+        '    comes out symmetric. Lower the floor or widen the base.',
+    );
   }
   if (cfg.COMPOUND_ENABLED && cfg.COMPOUND_INTERVAL_SECS > 3600) {
     log(
@@ -66,21 +82,38 @@ async function validateRoles(ctx: Ctx): Promise<void> {
       log('  ⚠ vault is exempted on the proxy: translation/width caps are NOT enforced on-chain.');
     }
 
-    // A configured band width the proxy's maxWidth can never accept would make
-    // the keeper skip every block forever. Catch it here rather than in a log
-    // line that scrolls past once a block.
+    // A configured band width the proxy's maxWidth cannot accept in one step.
+    // This used to be a hard deadlock — the keeper skipped every block forever —
+    // and clampBandWidth now walks the width there instead, so the common case
+    // is SLOW, not stuck. The one remaining deadlock is a cap under a single
+    // tickSpacing, where no step exists at all. Both are caught here rather than
+    // in a log line that scrolls past once a block.
     if (!caps.exempted) {
       const [lower, upper] = await Promise.all([ctx.vault.baseLower(), ctx.vault.baseUpper()]);
       const currentWidth = upper - lower;
       const targetWidth = 2 * ctx.cfg.BASE_HALF_WIDTH_MULT * ctx.tickSpacing + ctx.tickSpacing;
       const delta = Math.abs(targetWidth - currentWidth);
-      if (delta > caps.maxWidth) {
+      const step = Math.floor(caps.maxWidth / ctx.tickSpacing) * ctx.tickSpacing;
+      if (step < ctx.tickSpacing) {
         log(
-          `  ⚠ DEADLOCK: band width ${currentWidth} -> ${targetWidth} is a change of ${delta}, ` +
-            `over the proxy's maxWidth ${caps.maxWidth}. Every rebalance will be skipped.`,
+          `  ⚠ DEADLOCK: the proxy's maxWidth ${caps.maxWidth} is under one tickSpacing ` +
+            `${ctx.tickSpacing}, so the band width can never change. Every width-changing ` +
+            'rebalance will be skipped.',
         );
         log(
-          `    Fix: set BASE_HALF_WIDTH_MULT to ~${Math.round((currentWidth - ctx.tickSpacing) / (2 * ctx.tickSpacing))}, ` +
+          `    Fix: have governance raise maxWidth to >= ${ctx.tickSpacing} ` +
+            '(RebalanceProxy.setCustomDiffWidth).',
+        );
+      } else if (delta > caps.maxWidth) {
+        const rebalances = Math.ceil(delta / step);
+        log(
+          `  ⚠ band width ${currentWidth} -> ${targetWidth} is a change of ${delta}, over the ` +
+            `proxy's maxWidth ${caps.maxWidth}. The keeper will WALK it in ${step}-tick steps: ` +
+            `~${rebalances} rebalances (≥ ${rebalances * caps.minIntervalSecs}s) before the band ` +
+            'reaches its configured width.',
+        );
+        log(
+          `    To land it in one step instead: set BASE_HALF_WIDTH_MULT to ~${Math.round((currentWidth - ctx.tickSpacing) / (2 * ctx.tickSpacing))}, ` +
             `or have governance raise maxWidth to >= ${delta} (RebalanceProxy.setCustomDiffWidth).`,
         );
       }

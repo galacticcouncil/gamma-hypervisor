@@ -72,7 +72,7 @@ fire, push the pool price with a large swap, then wait `DWELL_BLOCKS` blocks.
 5. **TWAP gate** — window clamped to the pool's actual history; skip if `|spot − TWAP| > MAX_DEV_TICKS`. The TWAP tick becomes the **placement** tick;
 6. **oracle clamp** — skip if the pool disagrees with the price feed by more than `ORACLE_MAX_DEV_TICKS`, or the feed is older than `ORACLE_MAX_AGE_SECS`;
 7. **gas floor** — skip if the signer's WETH balance is below `GAS_FLOOR_WEI`;
-8. compute the base band around the **placement** tick (`±BASE_HALF_WIDTH_MULT × tickSpacing`), clamped to the proxy's `maxTranslation`; place the limit range one-sided on the surplus token;
+8. compute the base band around the **placement** tick (`±BASE_HALF_WIDTH_MULT × tickSpacing`, **skewed by the vault's inventory** when `BASE_SKEW_ENABLED`), walked toward the target within the proxy's `maxWidth` and then its `maxTranslation`; place the limit range one-sided on whatever residual is left;
 9. derive `inMin`/`outMin` from the current positions and price, less `MINS_TOLERANCE_BPS`;
 10. `eth_call` **preflight**; if it would revert, log and skip;
 11. **submit** with a pinned `pending` nonce + `CONFIRMATIONS`.
@@ -91,6 +91,9 @@ fire, push the pool price with a large swap, then wait `DWELL_BLOCKS` blocks.
 | `BASE_HALF_WIDTH_MULT` | `10` | base half-width, in tickSpacings |
 | `LIMIT_WIDTH_MULT` | `1` | limit width, in tickSpacings |
 | `REBALANCE_THRESHOLD_MULT` | `5` | drift trigger, in tickSpacings |
+| `BASE_SKEW_ENABLED` | `false` | skew the base band by the vault's inventory instead of centering it |
+| `BASE_SKEW_MIN_LEG_MULT` | `8` | floor on EACH leg, in tickSpacings — never let a side collapse |
+| `BASE_SKEW_MAX_RATIO` | `8` | cap on the token0:token1 value ratio the band is asked to carry |
 | **gates** | | |
 | `MIN_INTERVAL_SECS` | `600` | min seconds between rebalances |
 | `DWELL_BLOCKS` | `3` | consecutive triggering blocks required |
@@ -115,6 +118,55 @@ fire, push the pool price with a large swap, then wait `DWELL_BLOCKS` blocks.
 
 `MAX_DEV_TICKS`/`ORACLE_MAX_DEV_TICKS` are in ticks: **1 tick ≈ 1 basis point**, so
 100 ticks ≈ 1%.
+
+### The skewed base band (`BASE_SKEW_ENABLED`)
+
+A symmetric base can only consume a matched pair of tokens, so everything the
+vault holds beyond a 50/50 split by value has nowhere to go but the strictly
+one-sided limit range. The arithmetic is exact: at token0 share `X`, the limit
+ends up holding `2X − 1` of NAV. Measured on mainnet at `X = 0.905`, that was
+81% of the vault in a single one-sided order (base $90, limit $4152).
+
+`2(X − 0.5)` is **twice** the `X − 0.5` that actually has to be sold to reach
+50/50 — so a full traversal of the limit does not land at 50/50, it REFLECTS
+`X → (1 − X)`. That is the flip-flop seen in the first weeks. And because
+`limitRange()` places the limit one tickSpacing *above* spot, spot is not inside
+it immediately after a rebalance: active depth is the base alone, and in a
+falling market spot never enters the limit at all. Measured active liquidity was
+~0.09–0.59e18 on base-only days against 9–113e18 when spot was inside the limit,
+with volume collapsing to $96 and $69 on two such days against $9–10k on normal
+ones.
+
+With `BASE_SKEW_ENABLED`, the base band is instead placed as `[P − d, P + w]`
+with `d ≠ w` chosen so the range's own preferred token0:token1 value ratio
+
+```
+r = ((k_w − 1)/k_w) / ((k_d − 1)/k_d),   k_x = 1.0001^(x/2)
+```
+
+matches the vault's actual `share0 / (1 − share0)`. A two-sided base always
+contains spot, so the pool keeps quoting and ClearingV2 keeps accepting
+deposits, and it converts *gradually* with no completion point to overshoot.
+The limit is left with a small residual.
+
+`d + w` is held equal to the symmetric width, so this is a **rotation of the
+band, not a widening** — the proxy's width-change cap stays out of the way in
+the common case. `share0 = 0.5` reproduces `centeredBand()` exactly, so the old
+behaviour is the identity case.
+
+Both legs are floored at `BASE_SKEW_MIN_LEG_MULT × tickSpacing`. Losing the
+downside leg would take the pool to zero depth below spot, and ClearingV2 then
+rejects every deposit with `price out of base range`. That floor is what binds
+at extreme inventory: with `BASE_HALF_WIDTH_MULT=16` and the default floor of 8,
+a vault at `X = 0.7` drops its limit from 40% to ~2% of NAV, at `X = 0.8` from
+60% to ~21%, and at `X = 0.905` from 81% to ~63% (floor binding). Widening the
+base, or lowering the floor, buys more of the range back.
+
+Nothing on-chain forbids any of this: `Hypervisor.rebalance`
+(`contracts/Hypervisor.sol:271`) requires only `lower < upper`, tickSpacing
+alignment, and that the limit range is not identical to the base;
+`RebalanceProxy.rebalance` (`contracts/RebalanceProxy.sol:94`) applies
+`isWithinRange` and `isWidthChangeWithinRange` to the **base ticks only**.
 
 ### Tuning `MINS_TOLERANCE_BPS`
 
