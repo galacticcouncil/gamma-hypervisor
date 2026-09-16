@@ -66,7 +66,7 @@ fire, push the pool price with a large swap, then wait `DWELL_BLOCKS` blocks.
 ## How it decides (each block)
 
 1. read `pool.slot0()` (spot tick) and the vault's `baseLower/baseUpper`;
-2. **trigger** if spot left the band, or drifted more than `REBALANCE_THRESHOLD_MULT × tickSpacing` from its center;
+2. **trigger** if spot left the band, or drifted more than `REBALANCE_THRESHOLD_MULT × tickSpacing` from its center; with no drift trigger, a stranded limit fires a **limit refresh** (`LIMIT_REFRESH_ENABLED`), and a half-traversed one fires a **fold at balance** (`FOLD_ENABLED`) — both zero-translation rebalances that leave the base ticks alone;
 3. **dwell** — the trigger must hold `DWELL_BLOCKS` blocks in a row;
 4. **cooldown** — `MIN_INTERVAL_SECS`, and the proxy's on-chain `minInterval`;
 5. **TWAP gate** — window clamped to the pool's actual history; skip if `|spot − TWAP| > MAX_DEV_TICKS`. The TWAP tick becomes the **placement** tick;
@@ -91,6 +91,9 @@ fire, push the pool price with a large swap, then wait `DWELL_BLOCKS` blocks.
 | `BASE_HALF_WIDTH_MULT` | `10` | base half-width, in tickSpacings |
 | `LIMIT_WIDTH_MULT` | `1` | limit width, in tickSpacings |
 | `REBALANCE_THRESHOLD_MULT` | `5` | drift trigger, in tickSpacings |
+| `FOLD_ENABLED` | `false` | bank a mixed limit into the base before it fully converts and reflects |
+| `FOLD_MIN_SHARE` | `0.4` | min-leg share of the limit's value that counts as "at balance" |
+| `FOLD_MIN_LIMIT_SHARE` | `0.05` | ignore limits under this fraction of NAV |
 | **gates** | | |
 | `MIN_INTERVAL_SECS` | `600` | min seconds between rebalances |
 | `DWELL_BLOCKS` | `3` | consecutive triggering blocks required |
@@ -115,6 +118,38 @@ fire, push the pool price with a large swap, then wait `DWELL_BLOCKS` blocks.
 
 `MAX_DEV_TICKS`/`ORACLE_MAX_DEV_TICKS` are in ticks: **1 tick ≈ 1 basis point**, so
 100 ticks ≈ 1%.
+
+### Fold at balance (`FOLD_ENABLED`)
+
+A symmetric base can only consume a matched pair of tokens, so everything the
+vault holds beyond a 50/50 split by value goes to the strictly one-sided limit
+range. The arithmetic is exact: at token0 share `X`, the limit ends up holding
+`2X − 1` of NAV — **twice** the `X − 0.5` that actually has to be sold to reach
+50/50. So a full traversal of the limit does not land at 50/50, it REFLECTS
+`X → (1 − X)`: the composition flip-flop seen in the pool's first weeks.
+
+The fold attacks the completion point. A limit that has reached a mixed
+composition (`FOLD_MIN_SHARE`, default 40/60) is a conversion the vault has
+been paid fees for but has not banked — left alone, the second half converts
+too and the position reflects. The fold fires the same zero-translation
+rebalance a limit refresh uses (base ticks unchanged, trivially inside the
+proxy caps): the burn-and-remint lets the base absorb the now-pairable
+inventory — the base mint is scarce-side constrained, so pairable tokens go to
+the base first — and re-parks only the residual one-sided. Each fold banks
+`X − 0.5` instead of letting the limit reflect it.
+
+Self-clearing by construction: the residual limit is one-sided again, so its
+min-leg share is 0 and the trigger disarms until real trading mixes it again.
+Composition can only be moved by genuine swaps through the pool (in-range
+amounts shift only when the price actually trades, paying the fee), and the
+action still sits behind the shared dwell, cooldown, TWAP and oracle gates.
+
+Backtested in `sim/` on three real DIA tapes (30d whipsaw, 90d bear, the
+Aug 29–Sep 16 launch tape): the fold was the only variant tested that beat the
+recenter+refresh baseline on **all three** (+0.7 / +1.2 / +2.2 pp vs HODL
+deltas); a trend-confirmation gate lost the bear tape. `FOLD_MIN_LIMIT_SHARE`
+skips folds on limits too small to be worth a cooldown slot (the backtests ran
+without this floor; it only suppresses economically irrelevant folds).
 
 ### Tuning `MINS_TOLERANCE_BPS`
 

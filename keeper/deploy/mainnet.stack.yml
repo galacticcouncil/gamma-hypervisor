@@ -52,6 +52,11 @@ services:
       BASE_HALF_WIDTH_MULT: '16'
       LIMIT_REFRESH_ENABLED: 'true'
       LIMIT_REFRESH_TICKS: '120'
+      # Fold a >=40/60 mixed limit into the base (zero-translation rebalance)
+      # before it fully converts and reflects. Won all three backtest tapes.
+      FOLD_ENABLED: 'true'
+      FOLD_MIN_SHARE: '0.4'
+      FOLD_MIN_LIMIT_SHARE: '0.05'
       LIMIT_WIDTH_MULT: '16'
       # 11/16 = 69% of the half-width: spec §D2's "re-centre at 70% displacement".
       REBALANCE_THRESHOLD_MULT: '11'
