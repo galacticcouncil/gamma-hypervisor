@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { decide, shouldRefreshLimit } from '../src/decide';
+import { decide, shouldFold, shouldRefreshLimit } from '../src/decide';
 
 const strat = { tickSpacing: 60, baseHalfWidthMult: 10, rebalanceThresholdMult: 5 };
 
@@ -75,5 +75,72 @@ describe('shouldRefreshLimit', () => {
     expect(
       shouldRefreshLimit({ ...limit, limitLower: 0, limitUpper: 0, spotTick: 184146 }).trigger,
     ).toBe(false);
+  });
+});
+
+describe('shouldFold', () => {
+  const base = {
+    limitLiquidity: 1n,
+    navValue: 100_000,
+    foldMinShare: 0.4,
+    foldMinLimitShare: 0.05,
+  };
+
+  it('holds while the limit is one-sided (nothing converted yet)', () => {
+    const r = shouldFold({ ...base, limitValue0: 40_000, limitValue1: 0 });
+    expect(r.trigger).toBe(false);
+    expect(r.reason).toMatch(/min leg 0.0%/);
+  });
+
+  it('holds while conversion is under the threshold', () => {
+    // 30/70 mixed: converted, but not yet "at balance"
+    const r = shouldFold({ ...base, limitValue0: 12_000, limitValue1: 28_000 });
+    expect(r.trigger).toBe(false);
+    expect(r.reason).toMatch(/min leg 30.0% < 40%/);
+  });
+
+  it('fires once the limit reaches the mixed threshold', () => {
+    const r = shouldFold({ ...base, limitValue0: 18_000, limitValue1: 22_000 });
+    expect(r.trigger).toBe(true);
+    expect(r.reason).toMatch(/45.0\/55.0 mixed/);
+  });
+
+  it('fires at exactly the threshold, either side heavy', () => {
+    expect(shouldFold({ ...base, limitValue0: 16_000, limitValue1: 24_000 }).trigger).toBe(true);
+    expect(shouldFold({ ...base, limitValue0: 24_000, limitValue1: 16_000 }).trigger).toBe(true);
+  });
+
+  it('ignores a dust limit — not worth a cooldown slot', () => {
+    // perfectly mixed but only 2% of NAV
+    const r = shouldFold({ ...base, limitValue0: 1_000, limitValue1: 1_000 });
+    expect(r.trigger).toBe(false);
+    expect(r.reason).toMatch(/2.0% of NAV < floor 5%/);
+  });
+
+  it('never fires without a limit position or value', () => {
+    expect(shouldFold({ ...base, limitLiquidity: 0n, limitValue0: 0, limitValue1: 0 }).trigger).toBe(false);
+    expect(shouldFold({ ...base, limitValue0: 0, limitValue1: 0 }).trigger).toBe(false);
+  });
+
+  it('is self-clearing: the post-fold residual limit is one-sided again', () => {
+    // after a fold the re-parked residual is 100% one token -> min leg 0
+    const r = shouldFold({ ...base, limitValue0: 0, limitValue1: 9_000 });
+    expect(r.trigger).toBe(false);
+  });
+
+  it('skips the NAV floor when navValue is omitted', () => {
+    // The caller reads NAV only once the composition test has passed, so the
+    // first (cheap) call must not apply the floor. Same dust limit as above.
+    const { navValue, ...noNav } = base;
+    expect(shouldFold({ ...noNav, limitValue0: 1_000, limitValue1: 1_000 }).trigger).toBe(true);
+    expect(shouldFold({ ...base, limitValue0: 1_000, limitValue1: 1_000 }).trigger).toBe(false);
+  });
+
+  it('rejects on composition before it would need NAV at all', () => {
+    // An unmixed limit must answer without the caller ever paying for NAV.
+    const { navValue, ...noNav } = base;
+    const r = shouldFold({ ...noNav, limitValue0: 40_000, limitValue1: 0 });
+    expect(r.trigger).toBe(false);
+    expect(r.reason).toMatch(/min leg 0.0%/);
   });
 });
