@@ -50,6 +50,20 @@ const Env = z.object({
    * fault, so the check stands down. Must match the keeper's ORACLE_MAX_DEV_TICKS.
    */
   ORACLE_MAX_DEV_TICKS: z.coerce.number().int().positive().default(50),
+  /**
+   * The keeper clamps the POOL TWAP against the oracle, not spot, so the
+   * watchdog has to build the same number or it disagrees with the thing it is
+   * watching. Both must match the keeper's TWAP_WINDOW_SECS / MIN_TWAP_WINDOW_SECS.
+   */
+  TWAP_WINDOW_SECS: z.coerce.number().int().positive().default(3600),
+  MIN_TWAP_WINDOW_SECS: z.coerce.number().int().positive().default(600),
+  /**
+   * Mirrors the keeper's LIMIT_REFRESH_TICKS. A one-sided limit routinely holds
+   * most of NAV, and it can sit entirely past spot earning nothing while the
+   * base stays comfortably inside its drift threshold — invisible to every
+   * other check here.
+   */
+  LIMIT_REFRESH_TICKS: z.coerce.number().int().positive().default(120),
   /** Pool vs oracle. Matches the deploy config's MAX_DIVERGENCE_BPS. */
   DIVERGENCE_BPS: z.coerce.number().int().positive().default(200),
   /** Feed age ceiling; mirrors STALE_SECONDS on the deploy side. */

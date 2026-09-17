@@ -168,7 +168,7 @@ services:
   # cannot report it. Every signal is read from chain, so it holds whether the
   # keeper is healthy, crashed or deleted.
   monitor:
-    image: galacticcouncil/gamma-monitor:0.2.0
+    image: galacticcouncil/gamma-monitor:0.3.0
     environment:
       RPC_URL: https://hdx.tarn.hydration.cloud
       KEEPER: '0x0B0bE14C1158Ba09B720812e70F819366614Cb96'
@@ -195,6 +195,14 @@ services:
       # Above this pool-vs-oracle gap the keeper is RIGHT to hold, so the
       # overdue check stands down rather than blaming it.
       ORACLE_MAX_DEV_TICKS: '50'
+      # The keeper clamps the pool TWAP against the oracle, not spot — the
+      # watchdog must build the same number or it disagrees with what it
+      # watches. Mirror the keeper's values exactly.
+      TWAP_WINDOW_SECS: '3600'
+      MIN_TWAP_WINDOW_SECS: '3000'
+      # Mirrors the keeper's LIMIT_REFRESH_TICKS: catches a one-sided limit
+      # parked out of range while the base sits inside its drift threshold.
+      LIMIT_REFRESH_TICKS: '120'
       DIVERGENCE_BPS: '200'
       STALE_SECONDS: '28800'
     networks:
