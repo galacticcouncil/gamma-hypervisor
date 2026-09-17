@@ -31,7 +31,10 @@ services:
       LIMIT_REFRESH_TICKS: '120'
       FOLD_ENABLED: 'true'
       FOLD_MIN_SHARE: '0.4'
-      FOLD_MIN_LIMIT_SHARE: '0.05'
+      # 0, not the code default 0.05: the backtests that justify this feature ran
+      # with no floor, so deploy exactly what was measured. Raise it only once a
+      # run shows dust folds actually wasting cooldown slots.
+      FOLD_MIN_LIMIT_SHARE: '0'
       LIMIT_WIDTH_MULT: '16'
       REBALANCE_THRESHOLD_MULT: '5'
 
