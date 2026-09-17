@@ -103,8 +103,15 @@ export interface FoldInput {
   limitValue1: number;
   /** Zero when the vault holds no limit position. */
   limitLiquidity: bigint;
-  /** Whole-vault value in the same token1 terms, for the worth-a-slot floor. */
-  navValue: number;
+  /**
+   * Whole-vault value in the same token1 terms, for the worth-a-slot floor.
+   *
+   * OPTIONAL, because reading it costs an RPC call the common block should not
+   * pay: the composition test below needs only the limit position the caller
+   * already has in hand, so callers check that first and supply `navValue` on
+   * the second call, once a fold is actually in prospect.
+   */
+  navValue?: number;
   /** Fire when min(leg)/limit value reaches this. 0.4 = the limit is ≥40/60 mixed. */
   foldMinShare: number;
   /** Ignore limits worth under this fraction of NAV — not worth a cooldown slot. */
@@ -138,22 +145,29 @@ export function shouldFold(i: FoldInput): Trigger {
   if (i.limitLiquidity === 0n) return { trigger: false, reason: 'no limit position' };
   const lv = i.limitValue0 + i.limitValue1;
   if (!(lv > 0)) return { trigger: false, reason: 'limit has no value' };
-  if (i.navValue > 0 && lv / i.navValue < i.foldMinLimitShare) {
+
+  // Composition first: it is derived entirely from the limit position the
+  // caller already read, so the far commoner "nothing to fold" answer costs
+  // nothing extra. The NAV floor below is the only part that needs a further
+  // read, and it is only consulted once this test has passed.
+  const minShare = Math.min(i.limitValue0, i.limitValue1) / lv;
+  if (minShare < i.foldMinShare) {
+    return {
+      trigger: false,
+      reason: `limit min leg ${(minShare * 100).toFixed(1)}% < ${(i.foldMinShare * 100).toFixed(0)}%`,
+    };
+  }
+
+  if (i.navValue !== undefined && i.navValue > 0 && lv / i.navValue < i.foldMinLimitShare) {
     return {
       trigger: false,
       reason: `limit ${((lv / i.navValue) * 100).toFixed(1)}% of NAV < floor ${(i.foldMinLimitShare * 100).toFixed(0)}%`,
     };
   }
-  const minShare = Math.min(i.limitValue0, i.limitValue1) / lv;
-  if (minShare >= i.foldMinShare) {
-    return {
-      trigger: true,
-      reason: `limit is ${(minShare * 100).toFixed(1)}/${((1 - minShare) * 100).toFixed(1)} mixed (>= ${(i.foldMinShare * 100).toFixed(0)}% min leg) — fold conversion into base`,
-    };
-  }
+
   return {
-    trigger: false,
-    reason: `limit min leg ${(minShare * 100).toFixed(1)}% < ${(i.foldMinShare * 100).toFixed(0)}%`,
+    trigger: true,
+    reason: `limit is ${(minShare * 100).toFixed(1)}/${((1 - minShare) * 100).toFixed(1)} mixed (>= ${(i.foldMinShare * 100).toFixed(0)}% min leg) — fold conversion into base`,
   };
 }
 

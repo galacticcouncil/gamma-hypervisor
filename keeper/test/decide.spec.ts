@@ -127,4 +127,20 @@ describe('shouldFold', () => {
     const r = shouldFold({ ...base, limitValue0: 0, limitValue1: 9_000 });
     expect(r.trigger).toBe(false);
   });
+
+  it('skips the NAV floor when navValue is omitted', () => {
+    // The caller reads NAV only once the composition test has passed, so the
+    // first (cheap) call must not apply the floor. Same dust limit as above.
+    const { navValue, ...noNav } = base;
+    expect(shouldFold({ ...noNav, limitValue0: 1_000, limitValue1: 1_000 }).trigger).toBe(true);
+    expect(shouldFold({ ...base, limitValue0: 1_000, limitValue1: 1_000 }).trigger).toBe(false);
+  });
+
+  it('rejects on composition before it would need NAV at all', () => {
+    // An unmixed limit must answer without the caller ever paying for NAV.
+    const { navValue, ...noNav } = base;
+    const r = shouldFold({ ...noNav, limitValue0: 40_000, limitValue1: 0 });
+    expect(r.trigger).toBe(false);
+    expect(r.reason).toMatch(/min leg 0.0%/);
+  });
 });

@@ -379,15 +379,23 @@ export async function evaluate(ctx: Ctx, blockNumber: number, state: KeeperState
   let fold: Trigger = { trigger: false, reason: 'fold disabled or superseded' };
   if (cfg.FOLD_ENABLED && baseUpper > baseLower && !decision.trigger && !refresh.trigger) {
     const spotPrice = priceFromSqrtX96(sqrtPriceX96);
-    const [t0, t1] = await readTotalAmounts(vault);
-    fold = shouldFold({
+    const shape = {
       limitValue0: toFloat(limitPos.amount0) * spotPrice,
       limitValue1: toFloat(limitPos.amount1),
       limitLiquidity: BigInt(limitPos.liquidity.toString()),
-      navValue: toFloat(t0) * spotPrice + toFloat(t1),
       foldMinShare: cfg.FOLD_MIN_SHARE,
       foldMinLimitShare: cfg.FOLD_MIN_LIMIT_SHARE,
-    });
+    };
+    // Composition test first, off the limit position already read above. This
+    // block is evaluated on EVERY quiet block — enabled, base present, neither
+    // other trigger armed, which is the steady state — so reading NAV here
+    // unconditionally would buy one extra RPC call per block per vault, for a
+    // floor that almost never changes the answer.
+    fold = shouldFold(shape);
+    if (fold.trigger && cfg.FOLD_MIN_LIMIT_SHARE > 0) {
+      const [t0, t1] = await readTotalAmounts(vault);
+      fold = shouldFold({ ...shape, navValue: toFloat(t0) * spotPrice + toFloat(t1) });
+    }
   }
 
   const block = await provider.getBlock(blockNumber);
