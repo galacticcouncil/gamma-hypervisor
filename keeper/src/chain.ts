@@ -2,7 +2,7 @@ import { ethers } from 'ethers';
 import { AGGREGATOR_V3_ABI, ERC20_ABI, HYPERVISOR_ABI, POOL_ABI, REBALANCE_PROXY_ABI } from './abis';
 import { resolveDwellSecs, type Config, type GlobalConfig } from './config';
 import { blankState, type KeeperState } from './state';
-import { log } from './log';
+import { log, logTagged } from './log';
 
 /**
  * The process-wide half: one RPC connection, one signer, one nonce.
@@ -17,9 +17,23 @@ export interface Chain {
   signer: ethers.Wallet;
 }
 
+/** What validateRoles found at startup; served by the status listener. */
+export interface VaultRoles {
+  rebalancerOk: boolean;
+  adminOk: boolean;
+  exempted: boolean;
+  deadlock: boolean;
+  warnings: string[];
+}
+
 /** Everything scoped to ONE vault. N of these share a single `Chain`. */
 export interface VaultCtx {
   chain: Chain;
+  /** lowercase vault address; the status listener's path key */
+  id: string;
+  /** descriptor LABEL, else the token-pair tag; never disambiguated */
+  label: string;
+  roles?: VaultRoles;
   /** Global settings unioned with this vault's overrides, flat as before. */
   cfg: Config;
   vault: ethers.Contract;
@@ -130,8 +144,11 @@ export async function createVaultContext(
       }
     : undefined;
 
+  const label = cfg.LABEL ?? `${symbol0}/${symbol1}`;
   const ctx: VaultCtx = {
     chain,
+    id: cfg.VAULT.toLowerCase(),
+    label,
     cfg,
     vault,
     pool,
@@ -148,9 +165,9 @@ export async function createVaultContext(
     feeRecipient: cfg.FEE_RECIPIENT ?? signer.address,
     dwellSecs: resolveDwellSecs(cfg, blockTimeSecs).secs,
     state: blankState(),
-    tag: `${symbol0}/${symbol1}`,
+    tag: label,
     // Reads ctx.tag late so disambiguation (below) applies to lines logged after it.
-    log: (msg: string) => log(`[${ctx.tag}] ${msg}`),
+    log: (msg: string) => logTagged(ctx.tag, msg),
   };
   return ctx;
 }

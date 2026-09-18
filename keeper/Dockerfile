@@ -24,7 +24,10 @@ ENV NODE_ENV=production
 RUN addgroup -S keeper && adduser -S keeper -G keeper && chown -R keeper:keeper /app
 USER keeper
 
-# The keeper is a poll loop with no listening port, so there is nothing to
-# healthcheck over the network. It exits non-zero on a fatal config or chain
-# error and the swarm restart policy brings it back.
+# read-only /status + /healthz when STATUS_PORT=8787; documentation only, never
+# publish it. NO HEALTHCHECK here: /healthz is advisory, and a 503 during an rpc
+# outage would restart the keeper and erase dwell, regime, the price trail and
+# lastCompoundTs. It exits non-zero on a fatal config or chain error and the
+# swarm restart policy brings it back.
+EXPOSE 8787
 CMD ["npm", "start"]

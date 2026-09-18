@@ -10,4 +10,9 @@ COPY src ./src
 ENV NODE_ENV=production
 RUN addgroup -S monitor && adduser -S monitor -G monitor && chown -R monitor:monitor /app
 USER monitor
+# read-only /status + /healthz when STATUS_PORT=8788; documentation only, never
+# publish it. NO HEALTHCHECK here: STATUS_PORT defaults to 0, so an image-level
+# check would kill every deploy that forgets the var, and each restart
+# re-notifies everything firing. the stack service carries a guarded check.
+EXPOSE 8788
 CMD ["npm", "start"]

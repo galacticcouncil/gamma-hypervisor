@@ -142,6 +142,21 @@ services:
       # the deploy key, so Admin.rebalance -> Hypervisor.rebalance reverts.
       # Dry run validates config, RPC, gates and band maths without sending.
       DRY_RUN: 'true'
+
+      # --- cutover (increment 3b): documentation only, nothing below is live ---
+      # this file does not mirror the running service (image, RPC_URL, caps,
+      # COMPOUND_ENABLED and DRY_RUN all differ; the reconcile PR-0 is out of
+      # scope for this change), so it must never be re-deployed as a stack. the
+      # single mainnet restart adds the three settings below with ONE
+      # `docker service update`, by hand over ssh — runbook: ui/deploy/README.md.
+      #   STATUS_PORT: '8787'      read-only listener on gamma_default only; never a
+      #                            ports: key, never on gateway. default 0 = off.
+      #   DWELL_SECS: '2025'       = DWELL_BLOCKS 900 x 2.25s measured; DWELL_BLOCKS
+      #                            stays so a rollback to the previous image keeps
+      #                            its semantics.
+      #   PRIVATE_KEY_FILE: /run/secrets/gamma_keeper_key
+      #                            with --secret-add gamma_keeper_key and
+      #                            --env-rm PRIVATE_KEY; both set is a fatal boot.
     networks:
       - default
     logging:
@@ -214,6 +229,30 @@ services:
       LIMIT_REFRESH_TICKS: '120'
       DIVERGENCE_BPS: '200'
       STALE_SECONDS: '28800'
+
+      # --- 0.4.0 (increment 2): documentation only, applied BY HAND per service
+      # until PR-0 reconciles this file with the running spec — deploying this
+      # stack as committed starts the monitor WITHOUT the status listener
+      # (DISCORD_WEBHOOK above is a placeholder; the live value is set out of
+      # band and never committed). the ui consumes /status; the monitor never
+      # consumes keeper verdicts.
+      #   STATUS_PORT: '8788'      GET /status + /healthz (process liveness only)
+      #                            on the overlay; default 0 = off
+      #   FAIL_ALERT_CYCLES: '3'   consecutive rpc failures before one
+      #                            monitor-rpc-failing critical; 0 = off
+      #   RPC_URL: https://rpc.hydradx.cloud
+      #                            off the keeper's provider, so one frozen node
+      #                            cannot blind keeper and watchdog at once
+    # enabled with 0.4.0. stack-level and guarded on STATUS_PORT, so a deploy
+    # that forgets the var can never restart-loop the watchdog (every restart
+    # re-alerts everything firing). `$$` stops compose from interpolating at
+    # deploy time so the container shell evaluates it. no healthcheck in the
+    # image itself, and none on the keeper at all.
+    # healthcheck:
+    #   test: ['CMD-SHELL', '[ "$${STATUS_PORT:-0}" = 0 ] || wget -q -O /dev/null http://127.0.0.1:$${STATUS_PORT}/healthz']
+    #   interval: 60s
+    #   timeout: 5s
+    #   retries: 3
     networks:
       - default
     logging:

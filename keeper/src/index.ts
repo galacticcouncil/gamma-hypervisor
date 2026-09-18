@@ -10,8 +10,11 @@ import {
 } from './chain';
 import { initialState, startKeeper } from './keeper';
 import { log } from './log';
+import { startStatus, status } from './status';
 
 async function main(): Promise<void> {
+  installProcessHandlers();
+
   // A config error is fatal for the whole process, by design: it is operator
   // error, and half a keeper is worse than none. Runtime errors are the
   // opposite — per vault and non-fatal (see startKeeper).
@@ -34,6 +37,14 @@ async function main(): Promise<void> {
   }
 
   await startKeeper(chain, vaults);
+
+  // after the block subscription, and never fatal: no listener is a working
+  // keeper, a keeper that will not start is not
+  try {
+    startStatus(global, chain, vaults, { blockTimeSecs });
+  } catch (e: any) {
+    log(`warn: status listener not started (${e?.message ?? e})`);
+  }
 }
 
 function globalBanner(cfg: GlobalConfig, vaultCount: number, blockTimeSecs: number): void {
@@ -42,6 +53,7 @@ function globalBanner(cfg: GlobalConfig, vaultCount: number, blockTimeSecs: numb
   log(`  gas          limit ${cfg.GAS_LIMIT}, +${cfg.GAS_PRICE_MARKUP_PCT}% over eth_gasPrice, floor ${cfg.GAS_FLOOR_WEI} wei`);
   log(`  tx           ${cfg.CONFIRMATIONS} confirmations, poll ${cfg.POLL_INTERVAL_MS}ms, lookback ${cfg.STARTUP_LOOKBACK_BLOCKS} blocks`);
   log(`  indexer      ${cfg.INDEXER_URL ?? 'off'}`);
+  log(`  status       ${cfg.STATUS_PORT ? `:${cfg.STATUS_PORT} (overlay only)` : 'off'}`);
   log(`  mode         ${cfg.DRY_RUN ? 'DRY_RUN (no tx)' : 'LIVE'}`);
 }
 
@@ -95,6 +107,19 @@ function vaultBanner(ctx: VaultCtx, blockTimeSecs: number): void {
 // per vault — one vault's broken roles say nothing about the others'.
 async function validateRoles(ctx: VaultCtx): Promise<void> {
   const signer = ctx.chain.signer.address.toLowerCase();
+
+  // the ⚠ lines below print exactly as before and are ALSO kept as data: they
+  // scroll away in a week-old log, and the fleet view has to show a deadlock.
+  const warnings: string[] = [];
+  const warn = (msg: string) => {
+    warnings.push(msg);
+    ctx.log(`  ⚠ ${msg}`);
+  };
+  let rebalancerOk = true;
+  let adminOk = true;
+  let exempted = false;
+  let deadlock = false;
+
   if (ctx.proxy) {
     const [rebalancer, admin] = await Promise.all([
       ctx.proxy.rebalancers(ctx.vault.address),
@@ -104,15 +129,19 @@ async function validateRoles(ctx: VaultCtx): Promise<void> {
     ctx.log(`  proxy        ${ctx.proxy.address}`);
     ctx.log(`  proxy caps   maxTranslation ${caps.maxTranslation}, maxWidth ${caps.maxWidth}, minInterval ${caps.minIntervalSecs}s${caps.exempted ? ' (vault EXEMPTED — caps not enforced)' : ''}`);
     if (rebalancer.toLowerCase() !== signer) {
-      ctx.log(`  ⚠ signer is NOT the proxy's rebalancer for this vault (${rebalancer}) — every call will revert "only rebalancer".`);
+      rebalancerOk = false;
+      warn(`signer is NOT the proxy's rebalancer for this vault (${rebalancer}) — every call will revert "only rebalancer".`);
     }
     if (admin === ethers.constants.AddressZero) {
-      ctx.log('  ⚠ no Admin set on the proxy for this vault — RebalanceProxy.rebalance will revert.');
+      adminOk = false;
+      warn('no Admin set on the proxy for this vault — RebalanceProxy.rebalance will revert.');
     } else if (admin.toLowerCase() !== ctx.owner.toLowerCase()) {
-      ctx.log(`  ⚠ vault.owner (${ctx.owner}) is not the proxy's Admin (${admin}) — the Admin must own the vault.`);
+      adminOk = false;
+      warn(`vault.owner (${ctx.owner}) is not the proxy's Admin (${admin}) — the Admin must own the vault.`);
     }
     if (caps.exempted) {
-      ctx.log('  ⚠ vault is exempted on the proxy: translation/width caps are NOT enforced on-chain.');
+      exempted = true;
+      warn('vault is exempted on the proxy: translation/width caps are NOT enforced on-chain.');
     }
 
     // A configured band width the proxy's maxWidth can never accept would make
@@ -124,8 +153,9 @@ async function validateRoles(ctx: VaultCtx): Promise<void> {
       const targetWidth = 2 * ctx.cfg.BASE_HALF_WIDTH_MULT * ctx.tickSpacing + ctx.tickSpacing;
       const delta = Math.abs(targetWidth - currentWidth);
       if (delta > caps.maxWidth) {
-        ctx.log(
-          `  ⚠ DEADLOCK: band width ${currentWidth} -> ${targetWidth} is a change of ${delta}, ` +
+        deadlock = true;
+        warn(
+          `DEADLOCK: band width ${currentWidth} -> ${targetWidth} is a change of ${delta}, ` +
             `over the proxy's maxWidth ${caps.maxWidth}. Every rebalance will be skipped.`,
         );
         ctx.log(
@@ -135,9 +165,29 @@ async function validateRoles(ctx: VaultCtx): Promise<void> {
       }
     }
   } else if (ctx.owner.toLowerCase() !== signer) {
-    ctx.log('  ⚠ signer is NOT the vault owner — rebalance() is onlyOwner and will revert.');
+    rebalancerOk = false;
+    warn('signer is NOT the vault owner — rebalance() is onlyOwner and will revert.');
     ctx.log('    Set PRIVATE_KEY to the owner key, or transferOwnership() to the signer.');
   }
+
+  ctx.roles = { rebalancerOk, adminOk, exempted, deadlock, warnings };
+}
+
+// last resort, never relied on: hooks, tees and the listener are never-throw by
+// construction. exiting on a stray rejection would lose dwell, regime, the
+// price trail and lastCompoundTs, which costs more than a logged line — so an
+// uncaught throw is counted into /status instead, and a keeper that is alive
+// but has thrown is visible rather than silent. registered from main() so
+// importing this module never installs process-wide handlers.
+function installProcessHandlers(): void {
+  process.on('unhandledRejection', (e: any) => {
+    status.fatal();
+    log(`unhandled rejection: ${e?.stack ?? e?.message ?? e}`);
+  });
+  process.on('uncaughtException', (e: any) => {
+    status.fatal();
+    log(`uncaught exception: ${e?.stack ?? e?.message ?? e}`);
+  });
 }
 
 main().catch((e) => {

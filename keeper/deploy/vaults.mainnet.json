@@ -1,0 +1,59 @@
+[
+  {
+    "_note": "shared descriptor: ui from day 1, monitor from 0.5.0, keeper from vault #2 (VAULTS_FILE). shipped as docker config gamma_vaults_v1 -> /run/config/vaults.json; configs are immutable, so bump the suffix and repoint the stacks on change. values mirror the COMMITTED keeper/deploy/mainnet.stack.yml (keeper env + monitor block), not the live service: PR-0a/PR-0 reconcile the two (the plan expects COMPOUND_ENABLED true live; the committed file says false) and the ui's config-drift finding shows any gap against keeper /config. keys the stack omits carry the keeper's code defaults; null = unset. DWELL_SECS 2025 = DWELL_BLOCKS 900 x 2.25s. UI_START_BLOCK 14363890 is the block the vault first has code (binary search on eth_getCode against rpc.hydradx.cloud, 2026-09-08T13:07:36Z); its first log is 30 blocks later at 14363920, so nothing is missed — the event indexer backfills Rebalance/ZeroBurn/Deposit/Withdraw from it in 2000-block chunks (~196 chunks to 2026-09-18). loaders ignore this _note key.",
+    "LABEL": "aDOT/HOLLAR",
+    "VAULT": "0xa206D0959813f17c17C87147271C49065438648A",
+    "ENTRYPOINT": "proxy",
+    "REBALANCE_PROXY": "0x8B7Dd119b7edb85D9cF166129DBec5D88DC78C94",
+    "ADMIN_ADDRESS": "0x8fc8a0d7cb9c6B2366Ec08f1Bf03067D54b67bc5",
+    "FEE_RECIPIENT": "0x6d6f646c70792f74727372790000000000000000",
+
+    "BASE_HALF_WIDTH_MULT": 16,
+    "LIMIT_WIDTH_MULT": 16,
+    "REBALANCE_THRESHOLD_MULT": 11,
+    "LIMIT_REFRESH_ENABLED": true,
+    "LIMIT_REFRESH_TICKS": 120,
+    "FOLD_ENABLED": true,
+    "FOLD_MIN_SHARE": 0.4,
+    "FOLD_MIN_LIMIT_SHARE": 0,
+
+    "MIN_INTERVAL_SECS": 21600,
+    "DWELL_BLOCKS": 900,
+    "DWELL_SECS": 2025,
+    "TWAP_ENABLED": true,
+    "TWAP_WINDOW_SECS": 3600,
+    "MIN_TWAP_WINDOW_SECS": 3000,
+    "MAX_DEV_TICKS": 50,
+    "ALLOW_UNSAFE_SPOT": false,
+    "MINS_TOLERANCE_BPS": 1000,
+
+    "ORACLE_ENABLED": true,
+    "ORACLE_FEED0": "0xFBCa0A6dC5B74C042DF23025D99ef0F1fcAC6702",
+    "ORACLE_FEED1": null,
+    "ORACLE_FEED0_SIDE": "token0",
+    "ORACLE_MAX_AGE_SECS": 28800,
+    "ORACLE_MAX_DEV_TICKS": 50,
+
+    "REGIME_ENABLED": true,
+    "REGIME_REENTRY_SECS": 7200,
+    "ELEVATED_HALF_WIDTH_MULT": 30,
+    "VOL_RATIO_ELEVATED": 3,
+    "VOL_BASELINE_DAYS": 30,
+    "VOL_BASELINE_REFRESH_SECS": 3600,
+    "MOVE_15M_ELEVATED": 0.02,
+    "MOVE_1H_EXTREME": 0.08,
+    "MM_UNDERLYING": "0x0000000000000000000000000000000100000005",
+    "INDEXER_BASE_ASSET": 5,
+    "INDEXER_QUOTE_ASSET": 10,
+
+    "COMPOUND_ENABLED": false,
+    "COMPOUND_MIN_FEES1": "0",
+    "COMPOUND_INTERVAL_SECS": 3600,
+
+    "MONITOR_CLEARING": "0x3541A3E5Db2d611904BE4F45A3CAFEA9A4df3e48",
+    "MONITOR_GRACE_SECS": 7200,
+    "MONITOR_DIVERGENCE_BPS": 200,
+
+    "UI_START_BLOCK": 14363890
+  }
+]

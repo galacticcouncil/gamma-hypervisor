@@ -196,6 +196,19 @@ const Env = z
     STARTUP_LOOKBACK_BLOCKS: z.coerce.number().int().positive().default(50_000),
 
     DRY_RUN: boolEnv(false),
+
+    // --- status listener (read-only, stack overlay only; 0 = off) ---
+    // GET-only node:http on STATUS_PORT serving a memory snapshot + the parsed
+    // cycle records. Never publish the port and never put the keeper on the
+    // gateway network — the redaction is a belt, the overlay is the trousers.
+    STATUS_PORT: z.coerce.number().int().min(0).max(65535).default(0),
+    STATUS_HOST: z.string().default('0.0.0.0'),
+    // pre-serialised cycle records kept per vault
+    STATUS_RING: z.coerce.number().int().min(1).max(65536).default(4096),
+
+    // Per-vault display name: the log tag and the ui's row label. Optional so a
+    // flat env keeps deriving `SYM0/SYM1` from the token symbols.
+    LABEL: z.string().min(1).max(24).optional(),
   })
   .superRefine((e, ctx) => {
     if (e.ENTRYPOINT === 'proxy' && !e.REBALANCE_PROXY) {
@@ -284,6 +297,9 @@ export const GLOBAL_KEYS = [
   'INDEXER_URL',
   'INDEXER_TIMEOUT_MS',
   'MM_DATA_PROVIDER',
+  'STATUS_PORT',
+  'STATUS_HOST',
+  'STATUS_RING',
 ] as const;
 
 /**
@@ -336,11 +352,12 @@ export const VAULT_KEYS = [
   'COMPOUND_ENABLED',
   'COMPOUND_MIN_FEES1',
   'COMPOUND_INTERVAL_SECS',
+  'LABEL',
 ] as const;
 
 export type GlobalKey = (typeof GLOBAL_KEYS)[number];
 export type VaultKey = (typeof VAULT_KEYS)[number];
-type EnvKey = keyof z.infer<typeof Env>;
+export type EnvKey = keyof z.infer<typeof Env>;
 
 // Compile-time proof that the split is a partition of the schema: a new setting
 // added above without being classified fails the build here rather than being
@@ -423,9 +440,14 @@ function normalise(key: string, v: unknown): string | undefined {
   throw new Error(`vault override ${key}: expected a string, number or boolean, got ${typeof v}`);
 }
 
+// vaults.json is shared with the monitor and the ui; their keys ride along, and
+// json has no comments, so a leading underscore is the file's comment convention
+export const SIBLING_KEY_RE = /^(_|(MONITOR|UI)_)/;
+
 function mergeVault(defaults: RawEnv, override: Record<string, unknown>, where: string): RawEnv {
   const merged: RawEnv = { ...defaults };
   for (const [k, v] of Object.entries(override)) {
+    if (SIBLING_KEY_RE.test(k)) continue;
     if (!(VAULT_KEYS as readonly string[]).includes(k)) {
       const global = (GLOBAL_KEYS as readonly string[]).includes(k);
       throw new Error(

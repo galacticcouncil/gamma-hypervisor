@@ -1,0 +1,108 @@
+# gamma ui — hydration mainnet. deploy as swarmpit stack "gamma-ui" on play, a
+# SEPARATE stack from "gamma": the ui joins gamma_default (external) to reach the
+# keeper and monitor listeners, and gateway (external) for traefik. it is the only
+# gamma service that is ever on gateway; keeper and monitor publish no ports.
+#
+# image: built from the repo root with ui/Dockerfile (it needs keeper/src):
+#   docker buildx build --platform linux/amd64 -f ui/Dockerfile \
+#     --build-arg COMMIT=$(git rev-parse --short HEAD) \
+#     -t galacticcouncil/gamma-ui:$(git rev-parse --short HEAD) --push .
+# commit-pinned tag, never :latest; swarmpit autoredeploy OFF (same rule as every
+# gamma image). replace <sha> below before deploying.
+#
+# before the first deploy, once: the descriptor as a docker config (no secret in
+# it, so the swarmpit tool is fine here). configs are immutable — on change bump
+# the suffix (gamma_vaults_v2) and repoint this file.
+#   docker config create gamma_vaults_v1 keeper/deploy/vaults.mainnet.json
+#
+# runbook: ui/deploy/README.md. this stack never touches the keeper's spec.
+services:
+  ui:
+    image: galacticcouncil/gamma-ui:<sha>
+    environment:
+      # NOT the keeper's provider (hdx.tarn): a frozen node must not blind
+      # keeper, monitor and ui at once. the fallback head source may be the
+      # keeper's — it is polled for eth_blockNumber only, for the `stalled` rule.
+      RPC_URL: https://rpc.hydradx.cloud
+      HEAD_FALLBACK_URL: https://hdx.tarn.hydration.cloud
+      VAULTS_FILE: /run/config/vaults.json
+      # set only once the keeper listener is deployed (increment 3b); until then
+      # leave it out and the keeper column reads `not configured`. stack-qualified
+      # service name on gamma_default; never echoed in any response.
+      KEEPER_URL: http://gamma_keeper:8787
+      # set only once monitor 0.4.0 is deployed (increment 2)
+      MONITOR_URL: http://gamma_monitor:8788
+      DB_PATH: /data/gamma.db
+      BACKUP_DIR: /backup
+      PUBLIC_URL: https://gamma.play.hydration.cloud
+      # adapter-node's origin behind traefik; keep equal to PUBLIC_URL
+      ORIGIN: https://gamma.play.hydration.cloud
+      # /metrics answers to overlay source ips, or to X-Metrics-Token when set.
+      # leave unset for overlay-only; a value is set out of band, never here.
+      # METRICS_TOKEN: <random>
+    configs:
+      - source: gamma_vaults_v1
+        target: /run/config/vaults.json
+    volumes:
+      - db:/data
+      - backup:/backup
+    networks:
+      - gamma_default
+      - gateway
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -qO- http://127.0.0.1:3000/healthz || exit 1']
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-file: '5'
+        max-size: 10m
+    deploy:
+      # one sqlite writer — never scale this
+      replicas: 1
+      # both volumes are node-local: a reschedule onto another node starts on an
+      # empty db and leaves every backup behind. pin the service to the node that
+      # holds them (swarmpit: nodes → hostname) before the first deploy.
+      # placement:
+      #   constraints: [node.hostname == <host>]
+      labels:
+        com.hydration.role: gamma-ui
+        traefik.docker.network: gateway
+        # router and service names are global to the traefik instance on gateway:
+        # `gamma-ui`, never `gamma` — the keeper/monitor stack is called gamma
+        traefik.http.routers.gamma-ui.rule: Host(`gamma.play.hydration.cloud`)
+        traefik.http.routers.gamma-ui.tls: 'true'
+        traefik.http.routers.gamma-ui.tls.certresolver: myresolver
+        traefik.http.services.gamma-ui.loadbalancer.server.port: '3000'
+        # the one label away from gating it, deliberately not enabled (operator: public read-only):
+        # traefik.http.routers.gamma-ui.middlewares: gamma-ui-auth@docker
+        # traefik.http.middlewares.gamma-ui-auth.basicauth.users: <user>:<htpasswd>
+      update_config:
+        parallelism: 1
+        order: stop-first
+        failure_action: rollback
+      restart_policy:
+        condition: any
+        delay: 10s
+      resources:
+        reservations:
+          cpus: '0.05'
+          memory: 64M
+        limits:
+          cpus: '0.5'
+          memory: 512M
+networks:
+  gamma_default:
+    external: true
+  gateway:
+    external: true
+volumes:
+  db:
+    driver: local
+  backup:
+    driver: local
+configs:
+  gamma_vaults_v1:
+    external: true
