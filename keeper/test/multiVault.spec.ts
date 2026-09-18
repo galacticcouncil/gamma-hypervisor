@@ -25,7 +25,8 @@ let saved: NodeJS.ProcessEnv;
 // populated it by import time — clear every key they look at.
 beforeEach(() => {
   saved = { ...process.env };
-  for (const k of [...GLOBAL_KEYS, ...VAULT_KEYS, 'VAULTS_JSON', 'VAULTS_FILE']) delete process.env[k];
+  for (const k of [...GLOBAL_KEYS, ...VAULT_KEYS, 'VAULTS_JSON', 'VAULTS_FILE', 'PRIVATE_KEY_FILE'])
+    delete process.env[k];
   process.env.PRIVATE_KEY = KEY;
   process.env.DRY_RUN = 'false';
   process.env.FEE_RECIPIENT = TREASURY;
@@ -319,5 +320,56 @@ describe('fold-at-balance is per-vault', () => {
     stepDwell(v, 'foldDwellSince', true, 1_000, 'fold');
     expect(stepDwell(v, 'foldDwellSince', false, 1_050, 'fold')).toBe(false);
     expect(v.state.foldDwellSince).toBe(0);
+  });
+});
+
+describe('PRIVATE_KEY_FILE', () => {
+  const write = (body: string) => {
+    const f = join(mkdtempSync(join(tmpdir(), 'keeperkey-')), 'key');
+    writeFileSync(f, body);
+    return f;
+  };
+
+  it('reads the signing key from the named file', () => {
+    delete process.env.PRIVATE_KEY;
+    process.env.PRIVATE_KEY_FILE = write(KEY);
+    process.env.VAULT = A;
+    expect(loadKeeperConfig().global.PRIVATE_KEY).toBe(KEY);
+  });
+
+  it('trims the trailing newline docker secret create leaves behind', () => {
+    delete process.env.PRIVATE_KEY;
+    process.env.PRIVATE_KEY_FILE = write(`${KEY}\n`);
+    process.env.VAULT = A;
+    expect(loadKeeperConfig().global.PRIVATE_KEY).toBe(KEY);
+  });
+
+  it('validates a file-supplied key exactly like an env one', () => {
+    delete process.env.PRIVATE_KEY;
+    process.env.PRIVATE_KEY_FILE = write('not-a-key');
+    process.env.VAULT = A;
+    expect(() => loadKeeperConfig()).toThrow(/0x \+ 64 hex/);
+  });
+
+  it('refuses to guess when both are set', () => {
+    process.env.PRIVATE_KEY = KEY;
+    process.env.PRIVATE_KEY_FILE = write(KEY);
+    process.env.VAULT = A;
+    expect(() => loadKeeperConfig()).toThrow(/both PRIVATE_KEY and PRIVATE_KEY_FILE/);
+  });
+
+  it('fails loudly on an unreadable or empty file', () => {
+    delete process.env.PRIVATE_KEY;
+    process.env.VAULT = A;
+    process.env.PRIVATE_KEY_FILE = '/nonexistent/keeper.key';
+    expect(() => loadKeeperConfig()).toThrow(/cannot read/);
+    process.env.PRIVATE_KEY_FILE = write('   \n');
+    expect(() => loadKeeperConfig()).toThrow(/file is empty/);
+  });
+
+  it('leaves the env path untouched when no file is named', () => {
+    process.env.PRIVATE_KEY = KEY;
+    process.env.VAULT = A;
+    expect(loadKeeperConfig().global.PRIVATE_KEY).toBe(KEY);
   });
 });

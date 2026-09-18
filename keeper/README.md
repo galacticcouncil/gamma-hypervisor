@@ -8,6 +8,23 @@ One process keeps **any number of vaults** — see [Several vaults in one
 process](#several-vaults-in-one-process). A flat environment still configures a
 single vault exactly as it always did.
 
+## The signing key
+
+`PRIVATE_KEY` in the environment is the default and stays supported. `PRIVATE_KEY_FILE`
+names a file instead — a Docker secret at `/run/secrets/...` — so the key never reaches
+the rendered stack environment, which Swarmpit exposes through its API and UI.
+
+Both paths land on the same variable and are validated by the same regex; there is no
+second, weaker route to a signing key. A trailing newline is trimmed, because
+`docker secret create` leaves one. **Setting both is a startup error** rather than a
+precedence rule: an operator who has set both cannot know which key is signing, and for
+a key that moves real liquidity a failed deploy is the cheaper outcome.
+
+This matters more with several vaults in one process. One signer holds
+`RebalanceProxy.rebalancers[vault]` and `Admin.advisors[vault]` on *every* pool it
+keeps, so the key's exposure is no longer bounded to one vault — and revoking it is a
+governance call per pool.
+
 ## The manipulation question (read this first)
 
 A concentrated-liquidity vault that re-centers on **spot** is exploitable: push the

@@ -16,7 +16,12 @@ const boolEnv = (def: boolean) =>
 const Env = z
   .object({
     RPC_URL: z.string().url().default('http://127.0.0.1:9999'),
-    PRIVATE_KEY: z.string().regex(/^0x[0-9a-fA-F]{64}$/, 'PRIVATE_KEY must be 0x + 64 hex'),
+    // Supply this directly, or name a file with PRIVATE_KEY_FILE (a Docker
+    // secret) — see resolvePrivateKey(). Either way it lands here and is
+    // validated by this one regex.
+    PRIVATE_KEY: z
+      .string()
+      .regex(/^0x[0-9a-fA-F]{64}$/, 'PRIVATE_KEY must be 0x + 64 hex (or set PRIVATE_KEY_FILE to a file holding one)'),
     VAULT: addr.default('0xE80EF6C516fd3b12037Ca1708e77a1d78AF8db5E'),
 
     // direct = Model A (signer is the vault owner, calls Hypervisor.rebalance).
@@ -357,12 +362,52 @@ export interface KeeperConfig {
 
 type RawEnv = Record<string, string>;
 
+/**
+ * The signing key, from a file when one is named.
+ *
+ * Swarmpit renders stack environment in its API and its UI, so a key in
+ * `PRIVATE_KEY` is readable by anyone with Swarmpit access — and with several
+ * vaults on one signer that key holds `rebalancers[vault]` and
+ * `advisors[vault]` on every pool at once. `PRIVATE_KEY_FILE` lets it come from
+ * a Docker secret at /run/secrets/... instead, which never reaches the rendered
+ * environment.
+ *
+ * Resolved BEFORE zod so the file and the variable go through exactly the same
+ * validation — there is no second, weaker path to a signing key.
+ *
+ * Setting both is an error rather than a precedence rule. An operator who has
+ * set both cannot know which key is signing, and for a key that moves real
+ * liquidity "we quietly picked one" is a worse outcome than a failed deploy.
+ */
+function resolvePrivateKey(out: RawEnv): void {
+  const path = process.env.PRIVATE_KEY_FILE;
+  if (!path) return;
+  if (out.PRIVATE_KEY !== undefined) {
+    throw new Error(
+      'both PRIVATE_KEY and PRIVATE_KEY_FILE are set — unset one. ' +
+        'Refusing to guess which key should sign.',
+    );
+  }
+  let raw: string;
+  try {
+    raw = readFileSync(path, 'utf8');
+  } catch (e: any) {
+    throw new Error(`PRIVATE_KEY_FILE ${path}: cannot read (${e?.message ?? e})`);
+  }
+  // Secret files are routinely written with a trailing newline, and `docker
+  // secret create` from a shell here-string adds one. Trimming is not optional.
+  const key = raw.trim();
+  if (key === '') throw new Error(`PRIVATE_KEY_FILE ${path}: file is empty`);
+  out.PRIVATE_KEY = key;
+}
+
 function rawDefaults(): RawEnv {
   const out: RawEnv = {};
   for (const k of [...GLOBAL_KEYS, ...VAULT_KEYS]) {
     const v = process.env[k];
     if (v !== undefined && v !== '') out[k] = v;
   }
+  resolvePrivateKey(out);
   return out;
 }
 
