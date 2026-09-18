@@ -276,3 +276,48 @@ describe('two vaults keep their state apart', () => {
     expect(b.prices.moveOver(3600, 1_700_000_000)).toBeUndefined();
   });
 });
+
+describe('fold-at-balance is per-vault', () => {
+  it('inherits the flat FOLD_* defaults and lets one vault opt out', () => {
+    process.env.FOLD_ENABLED = 'true';
+    process.env.FOLD_MIN_SHARE = '0.4';
+    process.env.FOLD_MIN_LIMIT_SHARE = '0';
+    // 16, not the schema default 10, so inheritance is distinguishable from
+    // the second vault's override below.
+    process.env.BASE_HALF_WIDTH_MULT = '16';
+    process.env.VAULTS_JSON = JSON.stringify([
+      { VAULT: A },
+      { VAULT: B, FOLD_ENABLED: false, BASE_HALF_WIDTH_MULT: 10 },
+    ]);
+    const { vaults } = loadKeeperConfig();
+    expect(vaults[0].FOLD_ENABLED).toBe(true);
+    expect(vaults[0].FOLD_MIN_LIMIT_SHARE).toBe(0);
+    expect(vaults[1].FOLD_ENABLED).toBe(false);
+    // neither override may leak sideways
+    expect(vaults[0].BASE_HALF_WIDTH_MULT).toBe(16);
+    expect(vaults[1].BASE_HALF_WIDTH_MULT).toBe(10);
+    expect(vaults[1].FOLD_MIN_SHARE).toBe(0.4);
+  });
+
+  it('keeps the fold dwell isolated between vaults', () => {
+    const mk = () => ({ state: blankState(), dwellSecs: 100, log: () => {} });
+    const a = mk();
+    const b = mk();
+    expect(stepDwell(a, 'foldDwellSince', true, 1_000, 'fold')).toBe(false);
+    expect(a.state.foldDwellSince).toBe(1_000);
+    // B has seen nothing; A's armed fold must not arm it
+    expect(b.state.foldDwellSince).toBe(0);
+    expect(stepDwell(b, 'foldDwellSince', true, 1_050, 'fold')).toBe(false);
+    // A clears its dwell at 1100, B not until 1150
+    expect(stepDwell(a, 'foldDwellSince', true, 1_100, 'fold')).toBe(true);
+    expect(stepDwell(b, 'foldDwellSince', true, 1_100, 'fold')).toBe(false);
+    expect(stepDwell(b, 'foldDwellSince', true, 1_150, 'fold')).toBe(true);
+  });
+
+  it('resets the fold dwell the moment the trigger clears', () => {
+    const v = { state: blankState(), dwellSecs: 100, log: () => {} };
+    stepDwell(v, 'foldDwellSince', true, 1_000, 'fold');
+    expect(stepDwell(v, 'foldDwellSince', false, 1_050, 'fold')).toBe(false);
+    expect(v.state.foldDwellSince).toBe(0);
+  });
+});
