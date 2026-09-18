@@ -1,0 +1,59 @@
+[
+  {
+    "_note": "lark4 fork rehearsal descriptor: the one vault of keeper/deploy/lark4.stack.yml (stack gamma-keeper on lark), addresses cross-checked against lark/deployments/lark4.json. ORACLE_ENABLED false by design — the fork's DIA prices are frozen at snapshot, so oracle rows render `off` and economics mean nothing; lark validates plumbing, liveness and the cutover commands. no monitor runs on lark: MONITOR_CLEARING is the fork's ClearingV2 (for the ui's deposits gate), MONITOR_GRACE_SECS / MONITOR_DIVERGENCE_BPS are for a later per-pool rehearsal. DWELL_SECS 18 = DWELL_BLOCKS 3 x 6s. UI_START_BLOCK 0 = index from genesis, the fork is short. keys the stack omits carry the keeper's code defaults; null = unset. loaders ignore this _note key.",
+    "LABEL": "aDOT/HOLLAR",
+    "VAULT": "0xFa45C2f07Cf62C543F2247E9e5B5a6acBEc762ae",
+    "ENTRYPOINT": "proxy",
+    "REBALANCE_PROXY": "0x4826533B4897376654Bb4d4AD88B7faFD0C98528",
+    "ADMIN_ADDRESS": "0x70e0bA845a1A0F2DA3359C97E0285013525FFC49",
+    "FEE_RECIPIENT": "0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266",
+
+    "BASE_HALF_WIDTH_MULT": 10,
+    "LIMIT_WIDTH_MULT": 16,
+    "REBALANCE_THRESHOLD_MULT": 5,
+    "LIMIT_REFRESH_ENABLED": true,
+    "LIMIT_REFRESH_TICKS": 120,
+    "FOLD_ENABLED": true,
+    "FOLD_MIN_SHARE": 0.4,
+    "FOLD_MIN_LIMIT_SHARE": 0,
+
+    "MIN_INTERVAL_SECS": 600,
+    "DWELL_BLOCKS": 3,
+    "DWELL_SECS": 18,
+    "TWAP_ENABLED": true,
+    "TWAP_WINDOW_SECS": 3600,
+    "MIN_TWAP_WINDOW_SECS": 300,
+    "MAX_DEV_TICKS": 100,
+    "ALLOW_UNSAFE_SPOT": false,
+    "MINS_TOLERANCE_BPS": 1000,
+
+    "ORACLE_ENABLED": false,
+    "ORACLE_FEED0": null,
+    "ORACLE_FEED1": null,
+    "ORACLE_FEED0_SIDE": "token0",
+    "ORACLE_MAX_AGE_SECS": 600,
+    "ORACLE_MAX_DEV_TICKS": 200,
+
+    "REGIME_ENABLED": true,
+    "REGIME_REENTRY_SECS": 7200,
+    "ELEVATED_HALF_WIDTH_MULT": 30,
+    "VOL_RATIO_ELEVATED": 3,
+    "VOL_BASELINE_DAYS": 30,
+    "VOL_BASELINE_REFRESH_SECS": 3600,
+    "MOVE_15M_ELEVATED": 0.02,
+    "MOVE_1H_EXTREME": 0.08,
+    "MM_UNDERLYING": "0x0000000000000000000000000000000100000005",
+    "INDEXER_BASE_ASSET": 5,
+    "INDEXER_QUOTE_ASSET": 10,
+
+    "COMPOUND_ENABLED": false,
+    "COMPOUND_MIN_FEES1": "0",
+    "COMPOUND_INTERVAL_SECS": 300,
+
+    "MONITOR_CLEARING": "0x1613beB3B2C4f22Ee086B2b38C1476A3cE7f78E8",
+    "MONITOR_GRACE_SECS": 600,
+    "MONITOR_DIVERGENCE_BPS": 200,
+
+    "UI_START_BLOCK": 0
+  }
+]
