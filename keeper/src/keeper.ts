@@ -18,6 +18,7 @@ import { isReservePaused } from './moneyMarket';
 import { blankState, type KeeperState } from './state';
 import { bandMultForRegime, nextRegime, type Regime } from './regime';
 import { log } from './log';
+import { status } from './status';
 
 export type { KeeperState } from './state';
 
@@ -157,10 +158,15 @@ export async function startKeeper(chain: Chain, vaults: VaultCtx[]): Promise<voi
   let busy = false;
 
   chain.provider.on('block', async (blockNumber: number) => {
+    // the three status hooks are no-ops without a listener and never throw:
+    // ethers dispatches this listener from a setTimeout with no catch, so a
+    // throw here would be an unhandled rejection and a restart
+    status.head(blockNumber, busy);
     if (busy) return; // never pipeline two rebalances; one confirms before the next block is evaluated
     busy = true;
     try {
       const block = await chain.provider.getBlock(blockNumber);
+      status.cycleStart(blockNumber, block?.timestamp ?? null);
       for (const v of vaults) {
         // A runtime failure is per vault and non-fatal: one unhealthy pool must
         // not stop the others from being kept. (Config errors are the opposite
@@ -175,6 +181,7 @@ export async function startKeeper(chain: Chain, vaults: VaultCtx[]): Promise<voi
       log(`#${blockNumber} error: ${e?.message ?? e}`);
     } finally {
       busy = false;
+      status.cycleEnd(blockNumber);
     }
   });
 

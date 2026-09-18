@@ -138,6 +138,11 @@ fire, push the pool price with a large swap, then wait `DWELL_SECS`.
 | `POLL_INTERVAL_MS` | `2000` | block poll interval |
 | `STARTUP_LOOKBACK_BLOCKS` | `50000` | how far back to find the last rebalance on start |
 | `DRY_RUN` | `false` | decide + log, never send |
+| **status listener** | | |
+| `STATUS_PORT` | `0` | read-only listener, `0` = off; overlay only, never publish a port or put the keeper on `gateway` |
+| `STATUS_HOST` | `0.0.0.0` | bind address — the overlay bounds the exposure, not this |
+| `STATUS_RING` | `4096` | cycle records kept per vault |
+| `LABEL` | — | per-vault display name: the log tag and the ui's row label |
 
 `MAX_DEV_TICKS`/`ORACLE_MAX_DEV_TICKS` are in ticks: **1 tick ≈ 1 basis point**, so
 100 ticks ≈ 1%.
@@ -478,6 +483,84 @@ is skipped, which is the correct failure direction.
 The floors are tight: with `MINS_TOLERANCE_BPS=1000` on a ±600-tick band, a 1%
 price push already drops consumption under them. Amounts move far faster than
 price, which is the same conversion documented in `mins.ts`.
+
+## Status listener
+
+`STATUS_PORT=8787` starts a read-only `node:http` listener inside the keeper
+process. It answers from memory: it never touches the provider, never throws
+into the block handler, and at the default `0` it starts nothing at all — a
+keeper without it behaves byte-for-byte as before.
+
+**Overlay only.** No `ports:` in the stack file, and never the `gateway`
+network. The redaction below is the belt; the private overlay is the trousers.
+
+| route | serves |
+|---|---|
+| `GET /status` | one snapshot: head, busy/skipped, per-vault dwell, regime, price trail, standing, last cycle |
+| | `head{number, ts, at}` is the last **evaluated** block, written as one triple; `seenHead{number, at}` is the newest block the subscription saw — they part company while a cycle is wedged |
+| `GET /config` | the config, whitelist-projected — there is no slot for `PRIVATE_KEY` and urls are reduced to `{host}` |
+| `GET /vaults/:id/cycles?since=&limit=&order=` | cycle records, strictly `seq > since` within this boot; a cursor from another boot serves the newest `limit`; `limit` max 500 |
+| `GET /vaults/:id/log?n=` | that vault's last `n` (≤ 300) **physical** log lines, text/plain, each stamped, without the `[tag] ` prefix |
+| `GET /events` | sse of cycle records, `id: <bootAt>:<seq>`; `Last-Event-ID` replays ≤ 500, and only within the same boot |
+| `GET /healthz` | 200, or 503 once the head is over 60s old or a cycle has been busy over 600s |
+
+`:id` is the lowercase vault address, the `LABEL`, or the log tag.
+
+**`/healthz` is advisory — nothing restarts on it.** There is deliberately no
+`HEALTHCHECK` in the image: a 503 during an RPC outage would restart the keeper
+and erase dwell, regime, the price trail and `lastCompoundTs`, which is worse
+than the outage it would be reacting to.
+
+### What a cycle records
+
+Every evaluated block folds into one `CycleRecord` per vault (`src/record.ts`,
+zod, `v: 1`), whose `outcome.code` is the exit `evaluate()` took:
+
+| code | means |
+|---|---|
+| `hold` | nothing triggered |
+| `arming` | a trigger is holding but the dwell has not been met |
+| `cooldown` | armed, inside `MIN_INTERVAL_SECS` (or the proxy's own) |
+| `compound-only` | nothing to rebalance, but a sweep was due |
+| `no-regime-feed-unreadable` | the oracle could not be read and `REGIME_ENABLED=false` |
+| `regime-extreme` | the regime machine refused to act |
+| `gate-blocked` | the TWAP or oracle clamp said no; `gate.failedAt` says which |
+| `gas-floor` | signer balance below `GAS_FLOOR_WEI` |
+| `clamp-unworkable` / `width-cap` | the proxy caps cannot accommodate the plan |
+| `dry-run` | planned, not sent |
+| `preflight-revert` | the call reverts, so it was never signed |
+| `landed` | a tx confirmed — `tx.hash`, `tx.kind` |
+| `error` | `evaluate()` threw; the cycle is still recorded |
+
+**Precedence**, because one cycle can print several of them: `error` > `landed` >
+`preflight-revert` / `dry-run` / `width-cap` / `clamp-unworkable` / `gas-floor` >
+`gate-blocked` / `regime-extreme` > `no-regime-feed-unreadable` > `compound-only`
+> `cooldown` > `arming` > `hold`.
+
+`compound-only` is the subtle one. The early return needs *nothing* to be due,
+compound included, so a cooled-down or still-arming vault with a sweep due runs
+on through the gates and exits at the compound branch — where a gate failure is
+only ever printed as `compound skipped: …`. Such records carry
+`cooldown.skipped` and the arming dwell as fields, set `gate.via =
+'compound-skipped'`, and still count as a `gate-blocked` **standing**, so a
+lockout that shows up only on compound-due cycles forms one episode instead of a
+stutter.
+
+### Redaction
+
+Every string that leaves the process is scrubbed **by value**, never by shape:
+
+- the signing key itself, in either case, with or without the `0x`;
+- `RPC_URL` / `INDEXER_URL`, replaced by their host;
+- any `//user:pass@` userinfo, plus the `url="…"` / `requestBody="…"` fragments
+  ethers v5 embeds in its `SERVER_ERROR` messages.
+
+A 64-hex *shape* rule would be wrong everywhere but `/config`: tx hashes are
+64-hex too, and `✓ rebalanced — 0x…` has to survive. `/config` is the one body
+asserted to carry no 64-hex run at all.
+
+`stdout` is untouched: `docker logs` stays byte-identical whether or not the
+listener is running.
 
 ## Deploying it (Docker Swarm / Swarmpit)
 
