@@ -55,12 +55,15 @@ export interface VolBaselineInput {
   days: number;
   timeoutMs: number;
   nowTs: number;
+  /** Per-vault logger, so the line says which pool it is about. */
+  log?: (msg: string) => void;
 }
 
 /** Current 1h vol and its N-day median, or `undefined` if the indexer is unusable. */
 export async function fetchVolBaseline(
   i: VolBaselineInput,
 ): Promise<{ current: number; median: number; samples: number } | undefined> {
+  const say = i.log ?? log;
   const from = i.nowTs - i.days * 86_400;
   const url =
     `${i.baseUrl.replace(/\/$/, '')}/candles` +
@@ -89,7 +92,7 @@ export async function fetchVolBaseline(
     const sorted = [...candles].sort((a, b) => a.intervalStart - b.intervalStart);
     const vols = sorted.map(parkinson).filter((v): v is number => v !== undefined);
     if (vols.length < 24) {
-      log(`  ! indexer returned only ${vols.length} usable candles — vol baseline unavailable`);
+      say(`  ! indexer returned only ${vols.length} usable candles — vol baseline unavailable`);
       return undefined;
     }
 
@@ -100,7 +103,7 @@ export async function fetchVolBaseline(
     return { current, median: base, samples: vols.length };
   } catch (e: any) {
     // Deliberately non-fatal: the keeper keeps running on its feed-based triggers.
-    log(`  ! vol baseline unavailable (${e?.message ?? e}) — falling back to feed-move triggers`);
+    say(`  ! vol baseline unavailable (${e?.message ?? e}) — falling back to feed-move triggers`);
     return undefined;
   }
 }

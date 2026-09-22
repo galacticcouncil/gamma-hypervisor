@@ -28,6 +28,15 @@ services:
     image: galacticcouncil/gamma-keeper:6a84e59
     environment:
       # --- signer ---
+      # Alternative: comment PRIVATE_KEY out, mount a Docker secret and point
+      # PRIVATE_KEY_FILE at it, so the key never appears in the rendered stack
+      # environment. With several vaults on one signer this key holds
+      # rebalancers[vault] and advisors[vault] on EVERY pool, so the exposure
+      # is no longer bounded to one. Setting both vars is a startup error.
+      #   docker secret create gamma_keeper_key ./key.txt
+      #   PRIVATE_KEY_FILE: /run/secrets/gamma_keeper_key
+      # plus, on the service:  secrets: [gamma_keeper_key]
+      # and at the top level:  secrets: {gamma_keeper_key: {external: true}}
       PRIVATE_KEY: '0x<64 hex — the keeper key for 0x0B0bE14C1158Ba09B720812e70F819366614Cb96>'
 
       # --- chain + identity ---

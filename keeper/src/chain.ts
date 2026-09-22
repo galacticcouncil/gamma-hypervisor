@@ -1,12 +1,27 @@
 import { ethers } from 'ethers';
 import { AGGREGATOR_V3_ABI, ERC20_ABI, HYPERVISOR_ABI, POOL_ABI, REBALANCE_PROXY_ABI } from './abis';
-import type { Config } from './config';
+import { resolveDwellSecs, type Config, type GlobalConfig } from './config';
+import { blankState, type KeeperState } from './state';
 import { log } from './log';
 
-export interface Ctx {
-  cfg: Config;
+/**
+ * The process-wide half: one RPC connection, one signer, one nonce.
+ *
+ * Deliberately NOT per vault. Sequential evaluation over a single signer is
+ * what keeps transactions from racing each other's nonce; giving each vault its
+ * own connection would only invite that race back.
+ */
+export interface Chain {
+  cfg: GlobalConfig;
   provider: ethers.providers.JsonRpcProvider;
   signer: ethers.Wallet;
+}
+
+/** Everything scoped to ONE vault. N of these share a single `Chain`. */
+export interface VaultCtx {
+  chain: Chain;
+  /** Global settings unioned with this vault's overrides, flat as before. */
+  cfg: Config;
   vault: ethers.Contract;
   pool: ethers.Contract;
   token0: ethers.Contract;
@@ -20,12 +35,52 @@ export interface Ctx {
   symbol1: string;
   owner: string;
   feeRecipient: string;
+  /** Wall-clock dwell for this vault, resolved once at startup. */
+  dwellSecs: number;
+  state: KeeperState;
+  /** Short human label, e.g. "aDOT/HOLLAR" — prefixes every log line. */
+  tag: string;
+  log: (msg: string) => void;
 }
 
-export async function createContext(cfg: Config): Promise<Ctx> {
+export function createChain(cfg: GlobalConfig): Chain {
   const provider = new ethers.providers.JsonRpcProvider(cfg.RPC_URL);
   provider.pollingInterval = cfg.POLL_INTERVAL_MS;
   const signer = new ethers.Wallet(cfg.PRIVATE_KEY, provider);
+  return { cfg, provider, signer };
+}
+
+/**
+ * Average seconds per block, from two recent blocks.
+ *
+ * Only used to translate the deprecated DWELL_BLOCKS into seconds, so a rough
+ * figure is fine — but it must come from the chain: Hydration has already
+ * changed its block time once (6s -> 2s), which silently cut every
+ * block-counted dwell to a third of its intended length.
+ */
+export async function measureBlockTimeSecs(
+  provider: ethers.providers.Provider,
+  fallbackSecs = 2,
+): Promise<number> {
+  try {
+    const head = await provider.getBlockNumber();
+    const span = Math.min(100, head);
+    if (span < 1) return fallbackSecs;
+    const [a, b] = await Promise.all([provider.getBlock(head - span), provider.getBlock(head)]);
+    const dt = (b.timestamp - a.timestamp) / span;
+    return dt > 0 ? dt : fallbackSecs;
+  } catch (e: any) {
+    log(`warn: could not measure block time (${e?.message ?? e}) — assuming ${fallbackSecs}s`);
+    return fallbackSecs;
+  }
+}
+
+export async function createVaultContext(
+  chain: Chain,
+  cfg: Config,
+  blockTimeSecs: number,
+): Promise<VaultCtx> {
+  const { provider, signer } = chain;
 
   const vault = new ethers.Contract(cfg.VAULT, HYPERVISOR_ABI, signer);
   const [poolAddr, token0, token1, tickSpacing, owner] = await Promise.all([
@@ -53,7 +108,7 @@ export async function createContext(cfg: Config): Promise<Ctx> {
       t1.decimals().catch(() => 18),
     ]);
   }
-  // Symbols are cosmetic (banner only) — keep best-effort.
+  // Symbols are cosmetic (banner and log tag only) — keep best-effort.
   const [symbol0, symbol1] = await Promise.all([
     t0.symbol().catch(() => '?'),
     t1.symbol().catch(() => '?'),
@@ -75,10 +130,9 @@ export async function createContext(cfg: Config): Promise<Ctx> {
       }
     : undefined;
 
-  return {
+  const ctx: VaultCtx = {
+    chain,
     cfg,
-    provider,
-    signer,
     vault,
     pool,
     token0: t0,
@@ -92,7 +146,28 @@ export async function createContext(cfg: Config): Promise<Ctx> {
     symbol1,
     owner,
     feeRecipient: cfg.FEE_RECIPIENT ?? signer.address,
+    dwellSecs: resolveDwellSecs(cfg, blockTimeSecs).secs,
+    state: blankState(),
+    tag: `${symbol0}/${symbol1}`,
+    // Reads ctx.tag late so disambiguation (below) applies to lines logged after it.
+    log: (msg: string) => log(`[${ctx.tag}] ${msg}`),
   };
+  return ctx;
+}
+
+/**
+ * Make the log tags unique.
+ *
+ * Two pools on the same pair (different fee tiers) would otherwise produce two
+ * identical prefixes, which is worse than no prefix at all — interleaved output
+ * that looks attributable and is not.
+ */
+export function disambiguateTags(vaults: VaultCtx[]): void {
+  const counts = new Map<string, number>();
+  for (const v of vaults) counts.set(v.tag, (counts.get(v.tag) ?? 0) + 1);
+  for (const v of vaults) {
+    if ((counts.get(v.tag) ?? 0) > 1) v.tag = `${v.tag}@${v.vault.address.slice(2, 8)}`;
+  }
 }
 
 // The RebalanceProxy's per-vault caps (falling back to its globals), read fresh
@@ -130,20 +205,21 @@ export async function readProxyCaps(proxy: ethers.Contract, vault: string): Prom
 // Restart-safe cooldown: recover the last rebalance timestamp from chain state
 // instead of trusting local memory. Proxy mode reads the proxy's mapping; direct
 // mode scans back for the vault's last Rebalance event.
-export async function readLastRebalanceTs(ctx: Ctx): Promise<number> {
+export async function readLastRebalanceTs(ctx: VaultCtx): Promise<number> {
   if (ctx.proxy) {
     const ts: ethers.BigNumber = await ctx.proxy.lastRebalance(ctx.vault.address);
     return ts.toNumber();
   }
   try {
-    const head = await ctx.provider.getBlockNumber();
+    const { provider } = ctx.chain;
+    const head = await provider.getBlockNumber();
     const fromBlock = Math.max(0, head - ctx.cfg.STARTUP_LOOKBACK_BLOCKS);
     const events = await ctx.vault.queryFilter(ctx.vault.filters.Rebalance(), fromBlock);
     if (events.length === 0) return 0;
-    const block = await ctx.provider.getBlock(events[events.length - 1].blockNumber);
+    const block = await provider.getBlock(events[events.length - 1].blockNumber);
     return block.timestamp;
   } catch (e: any) {
-    log(`warn: could not recover last Rebalance event (${e?.message ?? e}) — cooldown starts fresh`);
+    ctx.log(`warn: could not recover last Rebalance event (${e?.message ?? e}) — cooldown starts fresh`);
     return 0;
   }
 }
@@ -158,10 +234,10 @@ export async function readLastRebalanceTs(ctx: Ctx): Promise<number> {
  * own quote rather than a constant.
  */
 export async function txOverrides(
-  ctx: Pick<Ctx, 'provider' | 'cfg'>,
+  chain: Pick<Chain, 'provider' | 'cfg'>,
   extra: Record<string, unknown> = {},
 ): Promise<Record<string, unknown>> {
-  const base = ethers.BigNumber.from(await ctx.provider.send('eth_gasPrice', []));
-  const gasPrice = base.mul(100 + ctx.cfg.GAS_PRICE_MARKUP_PCT).div(100);
-  return { gasPrice, gasLimit: ctx.cfg.GAS_LIMIT, ...extra };
+  const base = ethers.BigNumber.from(await chain.provider.send('eth_gasPrice', []));
+  const gasPrice = base.mul(100 + chain.cfg.GAS_PRICE_MARKUP_PCT).div(100);
+  return { gasPrice, gasLimit: chain.cfg.GAS_LIMIT, ...extra };
 }

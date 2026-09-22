@@ -41,10 +41,13 @@ export interface CompoundInput {
   /** Explicit legacy gasPrice; see config.ts GAS_PRICE_MARKUP_PCT. */
   gasPrice: ethers.BigNumber;
   confirmations: number;
+  /** Per-vault logger, so the line says which pool it is about. */
+  log?: (msg: string) => void;
 }
 
 /** `true` if a compound landed, `false` if it was skipped or failed. Never throws. */
 export async function compoundOnce(i: CompoundInput): Promise<boolean> {
+  const say = i.log ?? log;
   try {
     const admin = new ethers.Contract(i.admin, ADMIN_COMPOUND_ABI, i.signer);
 
@@ -53,13 +56,13 @@ export async function compoundOnce(i: CompoundInput): Promise<boolean> {
     await admin.callStatic[BOUNDED](i.vault, i.inMin);
 
     const tx = await admin[BOUNDED](i.vault, i.inMin, { gasLimit: i.gasLimit, gasPrice: i.gasPrice });
-    log(`  compound submitted ${tx.hash}`);
+    say(`  compound submitted ${tx.hash}`);
     await tx.wait(i.confirmations);
-    log('  ✓ compounded');
+    say('  ✓ compounded');
     return true;
   } catch (e: any) {
     const reason = e?.reason ?? e?.error?.message ?? e?.message ?? e;
-    log(`  compound skipped: ${reason}`);
+    say(`  compound skipped: ${reason}`);
     return false;
   }
 }

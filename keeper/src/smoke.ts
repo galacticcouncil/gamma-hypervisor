@@ -1,5 +1,13 @@
-import { loadConfig } from './config';
-import { createContext, readProxyCaps } from './chain';
+import { loadKeeperConfig, vaultFlag } from './config';
+import {
+  createChain,
+  createVaultContext,
+  disambiguateTags,
+  measureBlockTimeSecs,
+  readProxyCaps,
+  type Chain,
+  type VaultCtx,
+} from './chain';
 import { oldestObservationAgeSecs, readSlot0, readTwapTick } from './pool';
 import { readTotalAmounts, surplusSide } from './vault';
 import { splitForBand } from './mins';
@@ -10,18 +18,36 @@ import { limitRange } from './ticks';
 import { log } from './log';
 
 // Read-only preflight of the whole gate stack: what the keeper would see and
-// which gate would stop it. Sends nothing.
+// which gate would stop it. Sends nothing. Covers every configured vault, or
+// just the one named by `--vault <address>`.
 async function main(): Promise<void> {
-  const cfg = loadConfig();
-  const ctx = await createContext(cfg);
+  const { global, vaults: cfgs } = loadKeeperConfig();
+  const only = vaultFlag(process.argv);
+  const chain = createChain(global);
+  const blockTimeSecs = await measureBlockTimeSecs(chain.provider);
+
+  const picked = only ? cfgs.filter((c) => c.VAULT.toLowerCase() === only.toLowerCase()) : cfgs;
+  if (picked.length === 0) throw new Error(`no configured vault matches ${only}`);
+
+  const ctxs: VaultCtx[] = [];
+  for (const cfg of picked) ctxs.push(await createVaultContext(chain, cfg, blockTimeSecs));
+  disambiguateTags(ctxs);
+
+  for (const ctx of ctxs) await smokeVault(chain, ctx);
+  process.exit(0);
+}
+
+async function smokeVault(chain: Chain, ctx: VaultCtx): Promise<void> {
+  const { cfg } = ctx;
+  const log = ctx.log;
 
   const { sqrtPriceX96, tick, observationCardinality } = await readSlot0(ctx.pool);
   const [baseLower, baseUpper] = await Promise.all([ctx.vault.baseLower(), ctx.vault.baseUpper()]);
   const [total0, total1] = await readTotalAmounts(ctx.vault);
-  const nowTs = (await ctx.provider.getBlock('latest')).timestamp;
+  const nowTs = (await chain.provider.getBlock('latest')).timestamp;
 
   log(`pool   ${ctx.pool.address}  ${ctx.symbol0}/${ctx.symbol1}  spacing=${ctx.tickSpacing}  decimals=${ctx.decimals0}/${ctx.decimals1}`);
-  log(`owner  ${ctx.owner}  signer=${ctx.signer.address}  isOwner=${ctx.owner.toLowerCase() === ctx.signer.address.toLowerCase()}`);
+  log(`owner  ${ctx.owner}  signer=${chain.signer.address}  isOwner=${ctx.owner.toLowerCase() === chain.signer.address.toLowerCase()}`);
   log(`slot0  tick=${tick}  price=${priceFromSqrtX96(sqrtPriceX96)}  obsCardinality=${observationCardinality}`);
   log(`vault  base=[${baseLower},${baseUpper}]  totalAmounts=(${total0.toString()}, ${total1.toString()})`);
 
@@ -88,7 +114,6 @@ async function main(): Promise<void> {
 
   log(`decide ${d.trigger ? 'TRIGGER' : 'hold'} — ${d.reason}`);
   log(`plan   base=[${d.newBaseLower},${d.newBaseUpper}]  limit=[${ll},${lu}]  surplus=${side}`);
-  process.exit(0);
 }
 
 main().catch((e) => {

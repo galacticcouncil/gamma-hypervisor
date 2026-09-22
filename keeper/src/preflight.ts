@@ -1,5 +1,5 @@
 import { ethers } from 'ethers';
-import type { Ctx } from './chain';
+import type { VaultCtx } from './chain';
 
 export interface RebalanceArgs {
   baseLower: number;
@@ -16,7 +16,7 @@ export function toCallArgs(a: RebalanceArgs) {
 }
 
 export async function preflight(
-  ctx: Ctx,
+  ctx: VaultCtx,
   a: RebalanceArgs,
 ): Promise<{ ok: boolean; error?: string }> {
   try {
