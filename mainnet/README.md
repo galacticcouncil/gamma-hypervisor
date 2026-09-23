@@ -219,7 +219,7 @@ leaving them keeps the whole Model B story theoretical. That key could:
 | Launch band | ±10% = `BASE_HALF_WIDTH_MULT=16` at spacing 60 | ALM spec §D1 (D5) |
 | Proxy caps | `maxTranslation` 500, `maxWidth` 300, `minInterval` 6h | ALM spec §C |
 | ClearingV2 | `twapInterval` 3600, `priceThreshold` 10_100 (1%) | ALM spec §B |
-| `maxTotalSupply` | ≈ $150k of shares at launch | economics study P4 |
+| `maxTotalSupply` | 150,000 shares — a share count, not USD (≈ $150k only at launch) | economics study P4 |
 | Gamma fee divisor | 255 (≈0.4%) at launch | ALM spec §H D3 |
 | Admin's admin | `0xaa7e…aa7e0`, not a multisig | economics study P5 |
 | `directDeposit` | off | ALM spec §B |
@@ -240,6 +240,13 @@ leaving them keeps the whole Model B story theoretical. That key could:
   constructor values apply. `maxTotalSupply` is different again — it is checked
   in `clearShares` *after* the mint, so an over-cap seed reverts the whole
   enacted transaction.
+- **`maxTotalSupply` caps shares, not USD.** `clearShares` compares
+  `totalSupply()` with it and reads no price, so the dollar size of a full
+  vault floats with the aDOT price and the vault's own gains and losses.
+  "≈ $150k" held only at the first deposit, which mints one share per HOLLAR
+  of value. On 2026-09-23 a share was worth 0.914 HOLLAR, so the
+  150,000-share cap filled at ~137,100 HOLLAR. To size a new cap, divide the
+  dollar target by the value per share at the time, and expect it to drift.
 - **The seed's allowance goes to the Hypervisor, not UniProxy.** `UniProxy`
   forwards `from = msg.sender` and the Hypervisor is what calls `transferFrom`.
   Approving UniProxy compiles, submits, enacts, and reverts.
