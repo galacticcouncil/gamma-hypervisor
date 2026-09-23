@@ -1,0 +1,15 @@
+# chopsticks fork of Hydration mainnet for test/fork/tc-caps.fork.test.js.
+# Start it with `npm run fork`, then run `npm run test:fork` in a second terminal.
+#
+# Pinned where the vault held 149,943.93 of its 150,000-share cap (2026-09-23),
+# so a deposit worth ~300 shares reverts before the motion and clears after it.
+endpoint:
+  - wss://rpc.hydradx.cloud
+  - wss://hydration-rpc.n.dwellir.com
+block: 14948259
+# Any account can "sign" with the 0xdeadbeef… mock signature: the test acts as
+# real committee members without their keys.
+mock-signature-host: true
+# Build a block as soon as a transaction arrives.
+build-block-mode: Instant
+port: 8001

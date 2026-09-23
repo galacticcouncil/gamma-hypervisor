@@ -9,8 +9,11 @@
     "handover": "node 03-handover.js",
     "verify": "node 04-verify.js",
     "rehearse": "node 10-chopsticks-rehearsal.js",
+    "tc-caps": "node 12-tc-caps.js",
     "all": "bash deploy-all.sh",
-    "test": "node --test"
+    "test": "node --test",
+    "fork": "npx --yes @galacticcouncil/chopsticks@2.3.0 --config test/fork/hydradx-mainnet.yml",
+    "test:fork": "FORK_WS_URL=ws://127.0.0.1:8001 node --test test/fork/tc-caps.fork.test.js"
   },
   "dependencies": {
     "@polkadot/api": "^14.0.1",
