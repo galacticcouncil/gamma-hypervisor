@@ -105,7 +105,9 @@ const Env = z
     // through AggregatorV3 and every mainnet feed reverts on getValue(). One
     // contract per pair, so feeds are ADDRESSES, not key strings.
     ORACLE_ENABLED: boolEnv(false),
-    ORACLE_FEED0: addr.optional(), // the volatile side's USD feed, e.g. DOT/USD
+    // the volatile side's USD feed (DOT/USD), or the MM's AaveOracle for a
+    // wrapper/share token with no feed of its own (GETH, GSOL).
+    ORACLE_FEED0: addr.optional(),
     ORACLE_FEED1: addr.optional(), // the other side's USD feed; omit if it is USD-pegged
     // Which pool side ORACLE_FEED0 prices. The pool tick is token1-per-token0, so
     // a feed on token1 must be inverted. Wrong value = oracle tick thousands of
