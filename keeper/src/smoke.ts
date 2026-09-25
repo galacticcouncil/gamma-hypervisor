@@ -11,7 +11,7 @@ import {
 import { oldestObservationAgeSecs, readSlot0, readTwapTick } from './pool';
 import { readTotalAmounts, surplusSide } from './vault';
 import { splitForBand } from './mins';
-import { readOracleTick } from './oracle';
+import { isMmFeed, readOracleTick } from './oracle';
 import { priceFromSqrtX96, sqrtPriceFromTick } from './price';
 import { decide } from './decide';
 import { limitRange } from './ticks';
@@ -91,6 +91,13 @@ async function smokeVault(chain: Chain, ctx: VaultCtx): Promise<void> {
         decimals1: ctx.decimals1,
         nowTs,
       });
+      const f0 = ctx.oracle.feed0;
+      if (isMmFeed(f0)) {
+        // show what the MM resolves to, so a wrong asset or source is visible here.
+        const src: string = await f0.oracle.getSourceOfAsset(f0.asset);
+        const ageLeg: string = await f0.at(src).XToUsdOracle().catch(() => src);
+        log(`oracle MM asset ${f0.asset}  source ${src}  age from ${ageLeg}`);
+      }
       log(`oracle tick=${o.tick}  age=${o.ageSecs}s (max ${cfg.ORACLE_MAX_AGE_SECS}s)  dev from pool=${Math.abs(placementTick - o.tick)} (max ${cfg.ORACLE_MAX_DEV_TICKS})`);
     } catch (e: any) {
       log(`oracle UNREADABLE (${e?.reason ?? e?.message ?? e}) — keeper would skip`);

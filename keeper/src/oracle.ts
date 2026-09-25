@@ -9,8 +9,14 @@ export interface OracleReading {
 }
 
 export interface OracleInput {
-  /** token0's USD feed (AggregatorV3). */
-  feed0: ethers.Contract;
+  /**
+   * feed0Side's price: an AggregatorV3 feed, or the money market's oracle.
+   *
+   * The MM form is for wrapper/share tokens (GETH, GSOL) with no feed of their
+   * own: it prices the pool token exactly as the MM does and follows any source
+   * change. Its age comes from the source's DIA leg (see MM_SOURCE_ABI).
+   */
+  feed0: ethers.Contract | MmFeed;
   /** token1's USD feed; omit when token1 is the USD-pegged side (e.g. HOLLAR). */
   feed1?: ethers.Contract;
   /**
@@ -44,6 +50,42 @@ async function readFeed(feed: ethers.Contract): Promise<{ usd: number; ts: numbe
   return { usd, ts: Number(round.updatedAt.toString()) };
 }
 
+export interface MmFeed {
+  kind: 'mm';
+  /** AaveOracle. */
+  oracle: ethers.Contract;
+  /** The MM reserve asset: the pool token's underlying. */
+  asset: string;
+  /** AaveOracle.BASE_CURRENCY_UNIT(), read once at startup. */
+  baseUnit: ethers.BigNumber;
+  /** Binds an address to MM_SOURCE_ABI; injected so tests need no provider. */
+  at: (address: string) => ethers.Contract;
+}
+
+async function readMmFeed(mm: MmFeed): Promise<{ usd: number; ts: number }> {
+  const [price, source] = await Promise.all([
+    mm.oracle.getAssetPrice(mm.asset),
+    mm.oracle.getSourceOfAsset(mm.asset),
+  ]);
+  if (source === ethers.constants.AddressZero) throw new Error(`MM oracle has no source for ${mm.asset}`);
+  const raw = ethers.BigNumber.from(price);
+  if (raw.lte(0)) throw new Error(`MM oracle priced ${mm.asset} at ${raw.toString()}`);
+  const usd = Number(raw.toString()) / Number(mm.baseUnit.toString());
+  if (!(usd > 0) || !Number.isFinite(usd)) throw new Error(`MM price for ${mm.asset} not usable: ${usd}`);
+
+  // plain feed: no XToUsdOracle(). a transient failure on an adapter lands on its
+  // latestRoundData(), which reverts, so this still fails closed.
+  const src = mm.at(source);
+  let ageFeed = src;
+  try {
+    ageFeed = mm.at(await src.XToUsdOracle());
+  } catch {}
+  const round = await ageFeed.latestRoundData();
+  return { usd, ts: Number(round.updatedAt.toString()) };
+}
+
+export const isMmFeed = (f: ethers.Contract | MmFeed): f is MmFeed => (f as MmFeed).kind === 'mm';
+
 // External-truth clamp: the pool tick the outside world implies. A swap through
 // our thin pool moves spot and (slowly) the pool TWAP, but cannot move the
 // exchanges these feeds aggregate — so requiring the pool TWAP to agree with this
@@ -52,7 +94,7 @@ async function readFeed(feed: ethers.Contract): Promise<{ usd: number; ts: numbe
 // Callers must treat any throw as fail-closed (skip the rebalance). The reported
 // age is that of the STALEST feed, so a fresh feed cannot mask a frozen one.
 export async function readOracleTick(o: OracleInput): Promise<OracleReading> {
-  const a = await readFeed(o.feed0);
+  const a = isMmFeed(o.feed0) ? await readMmFeed(o.feed0) : await readFeed(o.feed0);
 
   // token1 per token0, in human units.
   let priceHuman: number;
