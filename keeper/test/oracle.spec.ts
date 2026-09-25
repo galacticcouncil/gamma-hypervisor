@@ -130,6 +130,127 @@ describe('readOracleTick', () => {
   });
 });
 
+// A rate source is the stableswap precompile: latestAnswer()/decimals() only.
+// Deliberately has NO latestRoundData — calling it on the real thing reverts,
+// and a fake that lacks it will throw the same way if the reader ever reaches
+// for it.
+function fakeRate(rate: number | string, decimals = 8, address = '0xrate') {
+  return {
+    address,
+    latestAnswer: async () =>
+      ethers.BigNumber.from(typeof rate === 'string' ? rate : ethers.utils.parseUnits(String(rate), decimals)),
+    decimals: async () => decimals,
+  } as unknown as ethers.Contract;
+}
+
+describe('readOracleTick with a rate source (wrapper/share tokens)', () => {
+  // GETH/HOLLAR on mainnet: HOLLAR sorts first, so feed0 (ETH/USD) prices
+  // token1, and the rate is aETH per GETH share from the stableswap precompile.
+  // Pool price = GETH per HOLLAR = 1 / (ETH_USD × rate).
+  it('lifts the underlying feed by the rate before orienting (the GETH case)', async () => {
+    const o = await readOracleTick({
+      feed0Side: 'token1',
+      feed0: fakeFeed(2713.96, NOW),
+      rate: fakeRate(1.0160919),
+      decimals0: 18,
+      decimals1: 18,
+      nowTs: NOW,
+    });
+    expect(o.price).toBeCloseTo(1 / (2713.96 * 1.0160919), 12);
+    expect(o.tick).toBe(tickFromPrice(1 / (2713.96 * 1.0160919)));
+  });
+
+  it('applies the rate on the token0 side too', async () => {
+    const o = await readOracleTick({
+      feed0Side: 'token0',
+      feed0: fakeFeed(4, NOW),
+      rate: fakeRate(1.5),
+      decimals0: 18,
+      decimals1: 18,
+      nowTs: NOW,
+    });
+    expect(o.tick).toBe(tickFromPrice(6));
+  });
+
+  it('is exactly the un-rated reading when the rate is 1', async () => {
+    const plain = await readOracleTick({ feed0Side: 'token0', feed0: fakeFeed(4, NOW), decimals0: 18, decimals1: 18, nowTs: NOW });
+    const rated = await readOracleTick({ feed0Side: 'token0', feed0: fakeFeed(4, NOW), rate: fakeRate(1), decimals0: 18, decimals1: 18, nowTs: NOW });
+    expect(rated.tick).toBe(plain.tick);
+  });
+
+  it('scales by the rate source decimals rather than assuming 8', async () => {
+    const eight = await readOracleTick({ feed0Side: 'token0', feed0: fakeFeed(4, NOW), rate: fakeRate(1.5, 8), decimals0: 18, decimals1: 18, nowTs: NOW });
+    const eighteen = await readOracleTick({ feed0Side: 'token0', feed0: fakeFeed(4, NOW), rate: fakeRate(1.5, 18), decimals0: 18, decimals1: 18, nowTs: NOW });
+    expect(eighteen.tick).toBe(eight.tick);
+  });
+
+  it('takes its age from the feed — the rate is live state with no timestamp', async () => {
+    const o = await readOracleTick({
+      feed0Side: 'token1',
+      feed0: fakeFeed(2700, NOW - 1234),
+      rate: fakeRate(1.01),
+      decimals0: 18,
+      decimals1: 18,
+      nowTs: NOW,
+    });
+    expect(o.ageSecs).toBe(1234);
+  });
+
+  it('composes with a second feed', async () => {
+    // feed0 = $2700 underlying × 1.01 rate on token1; feed1 = $1 on token0.
+    const o = await readOracleTick({
+      feed0Side: 'token1',
+      feed0: fakeFeed(2700, NOW),
+      feed1: fakeFeed(1, NOW),
+      rate: fakeRate(1.01),
+      decimals0: 18,
+      decimals1: 18,
+      nowTs: NOW,
+    });
+    expect(o.tick).toBe(tickFromPrice(1 / (2700 * 1.01)));
+  });
+
+  it('throws on a zero rate rather than pricing the pool token at zero', async () => {
+    await expect(
+      readOracleTick({ feed0Side: 'token0', feed0: fakeFeed(4, NOW), rate: fakeRate('0'), decimals0: 18, decimals1: 18, nowTs: NOW }),
+    ).rejects.toThrow(/rate source .* returned 0/);
+  });
+
+  it('throws on a negative rate', async () => {
+    await expect(
+      readOracleTick({ feed0Side: 'token0', feed0: fakeFeed(4, NOW), rate: fakeRate('-1'), decimals0: 18, decimals1: 18, nowTs: NOW }),
+    ).rejects.toThrow(/returned -/);
+  });
+
+  it('propagates a reverting rate source so the caller fails closed', async () => {
+    const broken = {
+      address: '0xdead',
+      latestAnswer: async () => {
+        throw new Error('call revert exception');
+      },
+      decimals: async () => 8,
+    } as unknown as ethers.Contract;
+    await expect(
+      readOracleTick({ feed0Side: 'token0', feed0: fakeFeed(4, NOW), rate: broken, decimals0: 18, decimals1: 18, nowTs: NOW }),
+    ).rejects.toThrow(/revert/);
+  });
+
+  it('never calls latestRoundData on the rate source', async () => {
+    // The real precompile reverts on it; a reader that reached for it would
+    // fail closed on every block. Prove the code path does not touch it.
+    const rate = {
+      address: '0xrate',
+      latestAnswer: async () => ethers.BigNumber.from('101609190'),
+      decimals: async () => 8,
+      latestRoundData: async () => {
+        throw new Error('must not be called');
+      },
+    } as unknown as ethers.Contract;
+    const o = await readOracleTick({ feed0Side: 'token0', feed0: fakeFeed(4, NOW), rate, decimals0: 18, decimals1: 18, nowTs: NOW });
+    expect(o.tick).toBe(tickFromPrice(4 * 1.0160919));
+  });
+});
+
 describe('readOracleTick orientation', () => {
   // The pool tick means "token1 per token0". A feed on token1 is therefore the
   // reciprocal of that, and using it as-is lands the oracle tick on the wrong

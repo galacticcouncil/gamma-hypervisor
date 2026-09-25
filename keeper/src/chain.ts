@@ -1,5 +1,5 @@
 import { ethers } from 'ethers';
-import { AGGREGATOR_V3_ABI, ERC20_ABI, HYPERVISOR_ABI, POOL_ABI, REBALANCE_PROXY_ABI } from './abis';
+import { AGGREGATOR_V3_ABI, ERC20_ABI, HYPERVISOR_ABI, POOL_ABI, RATE_SOURCE_ABI, REBALANCE_PROXY_ABI } from './abis';
 import { resolveDwellSecs, type Config, type GlobalConfig } from './config';
 import { blankState, type KeeperState } from './state';
 import { log } from './log';
@@ -27,7 +27,7 @@ export interface VaultCtx {
   token0: ethers.Contract;
   token1: ethers.Contract;
   proxy?: ethers.Contract; // ENTRYPOINT=proxy (Model B)
-  oracle?: { feed0: ethers.Contract; feed1?: ethers.Contract }; // ORACLE_ENABLED
+  oracle?: { feed0: ethers.Contract; feed1?: ethers.Contract; rate?: ethers.Contract }; // ORACLE_ENABLED
   tickSpacing: number;
   decimals0: number;
   decimals1: number;
@@ -121,11 +121,17 @@ export async function createVaultContext(
   // One AggregatorV3 contract per pair, so the clamp needs one feed per token.
   // feed1 is optional: omit it when token1 is the USD-pegged side (HOLLAR), and
   // token0/USD is the pool price directly.
+  // rate is optional too: a wrapper/share token (GETH, GSOL) has no USD feed of
+  // its own, so feed0 prices the UNDERLYING and the rate converts it. See
+  // RATE_SOURCE_ABI for why it gets its own, narrower ABI.
   const oracle = cfg.ORACLE_ENABLED
     ? {
         feed0: new ethers.Contract(cfg.ORACLE_FEED0!, AGGREGATOR_V3_ABI, provider),
         feed1: cfg.ORACLE_FEED1
           ? new ethers.Contract(cfg.ORACLE_FEED1, AGGREGATOR_V3_ABI, provider)
+          : undefined,
+        rate: cfg.ORACLE_RATE_SOURCE
+          ? new ethers.Contract(cfg.ORACLE_RATE_SOURCE, RATE_SOURCE_ABI, provider)
           : undefined,
       }
     : undefined;

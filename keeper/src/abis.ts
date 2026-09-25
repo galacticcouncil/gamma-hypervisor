@@ -60,3 +60,16 @@ export const AGGREGATOR_V3_ABI = [
   'function decimals() view returns (uint8)',
   'function description() view returns (string)',
 ];
+
+// An on-chain conversion rate that scales a feed's USD price into the pool
+// token's — for wrapper/share tokens with no feed of their own. On Hydration
+// that is the stableswap precompile (share -> underlying, e.g. pool 4200 -> aETH
+// for GETH), which is the exact leg the money market's USDOracleAdapter reads.
+// It exposes ONLY the legacy AggregatorV2 surface: latestRoundData(),
+// description() and version() all REVERT (verified 2026-09-25), and it has no
+// timestamp — it is live pool state, not a pushed feed. Kept to two selectors
+// so nothing here can accidentally reach for a method that reverts.
+export const RATE_SOURCE_ABI = [
+  'function latestAnswer() view returns (int256)',
+  'function decimals() view returns (uint8)',
+];

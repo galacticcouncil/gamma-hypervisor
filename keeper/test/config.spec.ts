@@ -103,4 +103,22 @@ describe('config refuses unsafe combinations', () => {
     process.env.ORACLE_FEED0 = ADDR;
     expect(loadConfig().ORACLE_FEED1).toBeUndefined();
   });
+
+  it('rejects a rate source with the oracle clamp off — it would be silently ignored', () => {
+    live();
+    process.env.ORACLE_ENABLED = 'false';
+    process.env.ORACLE_RATE_SOURCE = ADDR;
+    expect(() => loadConfig()).toThrow(/ORACLE_RATE_SOURCE/);
+  });
+
+  it('accepts a rate source alongside an enabled oracle (the GETH/GSOL shape)', () => {
+    live();
+    process.env.ORACLE_ENABLED = 'true';
+    process.env.ORACLE_FEED0 = ADDR;
+    process.env.ORACLE_FEED0_SIDE = 'token1';
+    process.env.ORACLE_RATE_SOURCE = '0x00000102737461626c657377000003ef00001068';
+    const c = loadConfig();
+    expect(c.ORACLE_RATE_SOURCE).toBe('0x00000102737461626c657377000003ef00001068');
+    expect(c.ORACLE_FEED0_SIDE).toBe('token1');
+  });
 });

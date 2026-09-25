@@ -129,6 +129,7 @@ fire, push the pool price with a large swap, then wait `DWELL_SECS`.
 | **oracle clamp** | | |
 | `ORACLE_ENABLED` | `false` | require agreement with an external feed |
 | `ORACLE_FEED0` / `ORACLE_FEED1` | — | Chainlink AggregatorV3 **addresses**, one per pair; omit `FEED1` if token1 is the USD side |
+| `ORACLE_RATE_SOURCE` | — | for a wrapper/share token: on-chain rate that lifts `FEED0`'s underlying price to the pool token (see below) |
 | `ORACLE_MAX_AGE_SECS` | `600` | reject staler feeds |
 | `ORACLE_MAX_DEV_TICKS` | `200` | max pool-vs-oracle deviation (~2%) |
 | **operations** | | |
@@ -138,6 +139,27 @@ fire, push the pool price with a large swap, then wait `DWELL_SECS`.
 | `POLL_INTERVAL_MS` | `2000` | block poll interval |
 | `STARTUP_LOOKBACK_BLOCKS` | `50000` | how far back to find the last rebalance on start |
 | `DRY_RUN` | `false` | decide + log, never send |
+
+### Wrapper and share tokens: `ORACLE_RATE_SOURCE`
+
+GETH and GSOL have no USD feed of their own. Each is an aToken over a stableswap share,
+and the money market prices it as **share-to-underlying rate × underlying/USD feed**
+(its `USDOracleAdapter`). The keeper composes the same two legs: `ORACLE_FEED0` is the
+*underlying's* feed (ETH/USD, SOL/USD) and `ORACLE_RATE_SOURCE` is the rate — on Hydration
+the stableswap precompile, `0x00000102` ‖ `"stablesw"` ‖ u32 to-asset ‖ u32 pool:
+
+| pool token | `ORACLE_FEED0` | `ORACLE_RATE_SOURCE` |
+|---|---|---|
+| GETH (pool 4200 → aETH 1007) | ETH/USD `0x1AF549Fe19A9B73D094173C41e18BF7F357F594b` | `0x00000102737461626c657377000003ef00001068` |
+| GSOL (pool 90001 → aSOL 1009) | SOL/USD `0x2FAA73BCC0115b9F67d2f36E53738B7FF95f0D2C` | `0x00000102737461626c657377000003f100015f91` |
+
+Why not point `ORACLE_FEED0` at the money market's adapter directly: it exposes only the
+legacy AggregatorV2 surface — `latestRoundData()`, `description()` and `version()` **revert**,
+and its `latestTimestamp()` is the current block time, so a five-day-stale ETH feed would
+still read as fresh. Composing it ourselves keeps the age check on the leg that can actually
+go stale. The rate is live pool state and has no timestamp; the reader only ever calls
+`latestAnswer()` and `decimals()` on it. `npm run smoke` prints the rate on its own line so
+a wrong precompile address shows up as a nonsense rate rather than a mysterious deviation.
 
 `MAX_DEV_TICKS`/`ORACLE_MAX_DEV_TICKS` are in ticks: **1 tick ≈ 1 basis point**, so
 100 ticks ≈ 1%.
@@ -230,7 +252,11 @@ error — two contexts on one vault would race each other for the signer's nonce
   { "VAULT": "0x1234…5678",                                    // 0.05% tier: spacing 10,
     "BASE_HALF_WIDTH_MULT": 96,                                //   so a different multiple
     "REBALANCE_THRESHOLD_MULT": 66,
-    "ORACLE_FEED0": "0xFBCa0A6dC5B74C042DF23025D99ef0F1fcAC6702" }
+    "ORACLE_FEED0": "0xFBCa0A6dC5B74C042DF23025D99ef0F1fcAC6702" },
+  { "VAULT": "0xGETH…vault",                                   // GETH/HOLLAR: HOLLAR is token0,
+    "ORACLE_FEED0_SIDE": "token1",                             //   feed0 prices token1 (GETH)
+    "ORACLE_FEED0": "0x1AF549Fe19A9B73D094173C41e18BF7F357F594b",           // ETH/USD
+    "ORACLE_RATE_SOURCE": "0x00000102737461626c657377000003ef00001068" }   // pool 4200 -> aETH
 ]
 ```
 

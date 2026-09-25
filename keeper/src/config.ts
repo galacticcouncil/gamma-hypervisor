@@ -111,6 +111,14 @@ const Env = z
     // a feed on token1 must be inverted. Wrong value = oracle tick thousands of
     // ticks off = every rebalance silently skipped. aDOT/HOLLAR sorts aDOT first.
     ORACLE_FEED0_SIDE: z.enum(['token0', 'token1']).default('token0'),
+    // For a wrapper/share token with no feed of its own (GETH, GSOL): ORACLE_FEED0
+    // prices the UNDERLYING (ETH/USD, SOL/USD) and this contract's latestAnswer()
+    // is the share-to-underlying rate that lifts it to the pool token — the same
+    // two legs the money market's USDOracleAdapter composes. On Hydration that is
+    // the stableswap precompile, e.g. pool 4200 -> aETH for GETH:
+    //   0x00000102 ‖ "stablesw" ‖ u32 to-asset ‖ u32 pool  (8 decimals)
+    // It is live pool state with no timestamp, so feed age still comes from FEED0.
+    ORACLE_RATE_SOURCE: addr.optional(),
     ORACLE_MAX_AGE_SECS: z.coerce.number().int().positive().default(600),
     ORACLE_MAX_DEV_TICKS: z.coerce.number().int().positive().default(200),
 
@@ -206,6 +214,16 @@ const Env = z
         code: z.ZodIssueCode.custom,
         path: ['ORACLE_FEED0'],
         message: 'ORACLE_FEED0 (an AggregatorV3 address) is required when ORACLE_ENABLED=true',
+      });
+    }
+    // A rate with the clamp off would be silently ignored — and a rate set on a
+    // vault whose feed already prices the pool token would double-scale it.
+    // Both are configuration mistakes worth failing at startup.
+    if (e.ORACLE_RATE_SOURCE && !e.ORACLE_ENABLED) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['ORACLE_RATE_SOURCE'],
+        message: 'ORACLE_RATE_SOURCE only applies with ORACLE_ENABLED=true (it scales ORACLE_FEED0)',
       });
     }
     if (!e.DRY_RUN && !e.FEE_RECIPIENT) {
@@ -320,6 +338,7 @@ export const VAULT_KEYS = [
   'ORACLE_FEED0',
   'ORACLE_FEED1',
   'ORACLE_FEED0_SIDE',
+  'ORACLE_RATE_SOURCE',
   'ORACLE_MAX_AGE_SECS',
   'ORACLE_MAX_DEV_TICKS',
   'REGIME_ENABLED',

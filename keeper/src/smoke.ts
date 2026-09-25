@@ -1,3 +1,4 @@
+import { ethers } from 'ethers';
 import { loadKeeperConfig, vaultFlag } from './config';
 import {
   createChain,
@@ -86,11 +87,18 @@ async function smokeVault(chain: Chain, ctx: VaultCtx): Promise<void> {
       const o = await readOracleTick({
         feed0: ctx.oracle.feed0,
         feed1: ctx.oracle.feed1,
+        rate: ctx.oracle.rate,
         feed0Side: cfg.ORACLE_FEED0_SIDE,
         decimals0: ctx.decimals0,
         decimals1: ctx.decimals1,
         nowTs,
       });
+      if (ctx.oracle.rate) {
+        // Show the rate on its own so a wrong precompile address is visible
+        // as "rate 0.00000001" here rather than as a 20,000-tick deviation.
+        const [raw, dec] = await Promise.all([ctx.oracle.rate.latestAnswer(), ctx.oracle.rate.decimals()]);
+        log(`oracle rate ${ctx.oracle.rate.address} = ${ethers.utils.formatUnits(raw, dec)} (pool token per unit of FEED0's asset)`);
+      }
       log(`oracle tick=${o.tick}  age=${o.ageSecs}s (max ${cfg.ORACLE_MAX_AGE_SECS}s)  dev from pool=${Math.abs(placementTick - o.tick)} (max ${cfg.ORACLE_MAX_DEV_TICKS})`);
     } catch (e: any) {
       log(`oracle UNREADABLE (${e?.reason ?? e?.message ?? e}) — keeper would skip`);
