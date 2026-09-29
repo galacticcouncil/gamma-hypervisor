@@ -235,12 +235,14 @@ meaning and becomes the default *for every vault*. On top of that:
 | var | meaning |
 |---|---|
 | `VAULTS_JSON` | a JSON **array** of per-vault override objects, inline |
-| `VAULTS_FILE` | a path to a file containing that same array |
+| `VAULTS_FILE` | a path to a file containing that same array — or several paths, comma-separated, each file holding one vault object (one file per pool) |
 
 `VAULTS_FILE` wins if both are set — a file is the deliberate, reviewable form, and
 a leftover inline `VAULTS_JSON` must not quietly beat it. **With neither set the
 keeper synthesises a one-element list from `VAULT`**, so an existing single-vault
-deployment runs unchanged.
+deployment runs unchanged. Once a list is set, the flat `VAULT` is no longer a
+vault of its own: to keep aDOT/HOLLAR in the same process, list
+`vaults/mainnet/adot-hollar.json` first.
 
 Each array element is a *partial*: it is merged over the defaults and then validated
 with the same refinements, **per vault**. A key set to JSON `null` drops the
