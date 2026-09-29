@@ -53,6 +53,14 @@
  * Everything is read from env — no deployments file needed, so whoever holds
  * the tokens can run it without the launch operator's records.
  *
+ * For one pool of a multi-pool launch, pass its pool file too:
+ *     ENV_FILE=.env.anchor POOL_FILE=pools/geth-hollar.env node 11-anchor-price.js --dry-run
+ * The pool file supplies V3_POOL, PRICE_FEED_A (a feed or the AaveOracle) and the
+ * pinned token order, so the feed is read on the right side of a HOLLAR-first
+ * pool; the Omnipool cross-check then defaults to that pool's own two tokens.
+ * With a pool file, .env.anchor holds only ANCHOR_PK, NET, the RPC URLs and gas /
+ * tolerance settings: POOL, PRICE_FEED_* and CROSSCHECK_* are per pool and refused there.
+ *
  * AFTERWARDS: spot has jumped away from the pool's own hourly average, and
  * ClearingV2 rejects deposits until they reconverge (~50-60 min for a 1000-tick
  * move). The handover can run immediately; the first DEPOSIT has to wait.
@@ -119,15 +127,16 @@ function saveState(net, obj) {
  * trade on the Omnipool, which is an entirely separate price source — if the
  * two disagree materially, something is wrong and we stop rather than anchor.
  */
-async function omnipoolCrossCheck(oracleE18) {
+async function omnipoolCrossCheck(oracleE18, pair) {
   const wsUrl = env("WS_URL", "");
   if (!wsUrl) {
     console.log("  ! WS_URL unset — skipping the Omnipool cross-check of the feed");
     return;
   }
   const { ApiPromise, WsProvider } = require("@polkadot/api");
-  const id0 = Number(env("CROSSCHECK_ASSET0", "1001"));
-  const id1 = Number(env("CROSSCHECK_ASSET1", "222"));
+  // Pinned pool order first, pool 1 last: a pool file must never borrow aDOT/HOLLAR.
+  const id0 = Number(env("CROSSCHECK_ASSET0", env("EXPECT_TOKEN0", "1001")));
+  const id1 = Number(env("CROSSCHECK_ASSET1", env("EXPECT_TOKEN1", "222")));
   const maxBps = BigInt(env("CROSSCHECK_MAX_BPS", "500"));
   const api = await ApiPromise.create({ provider: new WsProvider(wsUrl, 3000), noInitWarn: true });
   try {
@@ -141,9 +150,9 @@ async function omnipoolCrossCheck(oracleE18) {
     const provider = new ethers.JsonRpcProvider(env("EVM_RPC_URL", D.EVM_RPC_URL));
     const bal = async (token, dec) =>
       Number(await new ethers.Contract(token, ABI.erc20, provider).balanceOf(omni)) / 10 ** Number(dec);
-    const t0 = requireEnv("CROSSCHECK_TOKEN0");
-    const t1 = requireEnv("CROSSCHECK_TOKEN1");
-    const [d0, d1] = [Number(env("CROSSCHECK_DEC0", "10")), Number(env("CROSSCHECK_DEC1", "18"))];
+    const t0 = env("CROSSCHECK_TOKEN0", pair.token0);
+    const t1 = env("CROSSCHECK_TOKEN1", pair.token1);
+    const [d0, d1] = [Number(env("CROSSCHECK_DEC0", String(pair.dec0))), Number(env("CROSSCHECK_DEC1", String(pair.dec1)))];
     const [r0, r1] = await Promise.all([bal(t0, d0), bal(t1, d1)]);
     const h0 = Number(a0.unwrap().hubReserve.toString());
     const h1 = Number(a1.unwrap().hubReserve.toString());
@@ -175,7 +184,7 @@ async function main() {
   const provider = new ethers.JsonRpcProvider(requireEnv("EVM_RPC_URL"));
   const wallet = new ethers.Wallet(requireEnv("ANCHOR_PK"), provider);
   const confirmations = Number(env("CONFIRMATIONS", "2"));
-  const poolAddress = env("POOL", D.POOL);
+  const poolAddress = env("POOL", env("V3_POOL", D.POOL));
   const npmAddress = env("POSITION_MANAGER", D.POSITION_MANAGER);
   const routerAddress = env("SWAP_ROUTER", D.SWAP_ROUTER);
   const maxDevTicks = Number(env("ANCHOR_MAX_DEV_TICKS", "200"));
@@ -229,7 +238,7 @@ async function main() {
   }
 
   // --- where are we, where should we be -----------------------------------
-  const oracle = await resolveOraclePriceE18(ethers, provider, Number(env("STALE_SECONDS", "28800")));
+  const oracle = await resolveOraclePriceE18(ethers, provider, Number(env("STALE_SECONDS", "28800")), token0, token1);
   const poolE18 = priceE18FromSqrtPriceX96(slot0.sqrtPriceX96, dec0, dec1);
   const targetSqrt = sqrtPriceX96FromPriceE18(oracle.priceE18, dec0, dec1);
   const devTicks = tickDeltaBetweenSqrt(slot0.sqrtPriceX96, targetSqrt);
@@ -237,7 +246,7 @@ async function main() {
   console.log(`  pool   ${fmtE18(poolE18)} ${sym1}/${sym0}  tick ${slot0.tick}  liquidity ${liquidity}`);
   console.log(`  feed   ${fmtE18(oracle.priceE18)}  (age ${oracle.age}s)`);
   console.log(`  off by ${devTicks} ticks (tolerance ${maxDevTicks})`);
-  await omnipoolCrossCheck(oracle.priceE18);
+  await omnipoolCrossCheck(oracle.priceE18, { token0, token1, dec0, dec1 });
 
   if (Math.abs(devTicks) <= maxDevTicks) {
     console.log(`\n=== nothing to do — the pool is already within ${maxDevTicks} ticks of the feed ===`);

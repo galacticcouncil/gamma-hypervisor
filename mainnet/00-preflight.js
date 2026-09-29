@@ -21,7 +21,7 @@ const {
   fmtE18,
   fmtUnits,
   loadArtifact,
-  readFeedE18,
+  resolveOraclePriceE18,
   ABI,
 } = require("./lib");
 
@@ -288,6 +288,15 @@ function checkGuards(poolInfo) {
         `by (cap - 2*spacing) ticks, which would be <= 0, so it can never converge`
     );
   }
+  // customDiff must clear the keeper's own drift trigger, or every re-centre is
+  // clamped and the band ratchets off-centre — what cost aDOT a referendum
+  // (500 against a 660 trigger). Only checkable when the pool file names the trigger.
+  if (maxTranslation !== undefined && env("REBALANCE_THRESHOLD_MULT")) {
+    const trigger = Number(env("REBALANCE_THRESHOLD_MULT")) * spacing;
+    maxTranslation > trigger
+      ? pass(`MAX_TRANSLATION ${maxTranslation} clears the keeper trigger ${trigger} by ${maxTranslation - trigger} ticks`)
+      : fail(`MAX_TRANSLATION ${maxTranslation} does not exceed the keeper trigger ${trigger} — every re-centre would be clamped`);
+  }
 
   // The band 03-handover.js sets is the baseline maxWidth is measured against.
   // centeredBand's outward rounding can differ by up to 2*spacing between two
@@ -387,17 +396,14 @@ async function checkPriceAndMarket(provider, poolInfo) {
     fail(`PRICE_FEED_A is not an address: ${feedA}`);
   } else {
     try {
-      const feed = new ethers.Contract(feedA, ABI.aggregatorV3, provider);
-      const [description, reading] = await Promise.all([
-        feed.description(),
-        readFeedE18(ethers, feedA, provider, stale),
-      ]);
-      pass(`PRICE_FEED_A ${description}: ${fmtE18(reading.priceE18)} USD (age ${reading.age}s)`);
-      let oracle = reading.priceE18;
-      if (env("PRICE_FEED_B")) {
-        const b = await readFeedE18(ethers, env("PRICE_FEED_B"), provider, stale);
-        oracle = (oracle * 10n ** 18n) / b.priceE18;
-      }
+      // PRICE_FEED_A prices TOKEN_A; this is already turned to token1-per-token0.
+      const { priceE18: oracle, age, source } = await resolveOraclePriceE18(
+        ethers, provider, stale, poolInfo.t0.address, poolInfo.t1.address
+      );
+      const what = source.kind === "aave"
+        ? `AaveOracle price of ${source.asset} (age leg ${source.leg})`
+        : await new ethers.Contract(feedA, ABI.aggregatorV3, provider).description();
+      pass(`PRICE_FEED_A ${what}: ${fmtE18(source.priceE18)} USD (age ${age}s) = ${fmtE18(oracle)} ${poolInfo.t1.symbol}/${poolInfo.t0.symbol}`);
       const poolPrice = priceE18FromSqrtPriceX96(
         BigInt(poolInfo.slot0.sqrtPriceX96),
         poolInfo.t0.decimals,
@@ -409,8 +415,18 @@ async function checkPriceAndMarket(provider, poolInfo) {
         ? pass(`pool/feed divergence ${divergence} bps`)
         : note(`pool/feed divergence ${divergence} bps — investigate before seeding into it`);
     } catch (error) {
-      fail(`PRICE_FEED_A cannot supply a fresh AggregatorV3 reading: ${error.message}`);
+      fail(`PRICE_FEED_A cannot supply a fresh price: ${error.message}`);
     }
+  }
+
+  // The keeper's pause check reads MM_UNDERLYING, so it must be the reserve
+  // behind the pool's aToken — not a neighbour's, and not the aToken itself.
+  const aToken = [poolInfo.t0, poolInfo.t1].find((t) => t.id === Number(env("TOKEN_A", "1001")));
+  const reserve = aToken && (await new ethers.Contract(aToken.address, ABI.aToken, provider).UNDERLYING_ASSET_ADDRESS().catch(() => undefined));
+  if (reserve && env("MM_UNDERLYING")) {
+    reserve.toLowerCase() === env("MM_UNDERLYING").toLowerCase()
+      ? pass(`MM_UNDERLYING is ${aToken.symbol}'s reserve ${reserve}`)
+      : fail(`MM_UNDERLYING ${env("MM_UNDERLYING")} is not ${aToken.symbol}'s reserve ${reserve}`);
   }
 
   const dataProvider = env("MM_DATA_PROVIDER");

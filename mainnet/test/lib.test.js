@@ -83,3 +83,122 @@ test("priceE18FromSqrtPriceX96 is decimals-aware for a 10dp/18dp pair", () => {
   const diff = human > 9n * 10n ** 17n ? human - 9n * 10n ** 17n : 9n * 10n ** 17n - human;
   assert.ok(diff * 1_000_000n <= 9n * 10n ** 17n, `${human} is outside 1 ppm of 0.9e18`);
 });
+
+const fs = require("node:fs");
+const path = require("node:path");
+const dotenv = require("dotenv");
+const { poolSplitProblems, feedAIsToken0, resolveOraclePriceE18, stackFile, statePath } = require("../lib");
+
+const E18 = 10n ** 18n;
+const withEnv = (vars, fn) => {
+  const saved = {};
+  for (const k of Object.keys(vars)) {
+    saved[k] = process.env[k];
+    if (vars[k] === undefined) delete process.env[k];
+    else process.env[k] = vars[k];
+  }
+  return Promise.resolve()
+    .then(fn)
+    .finally(() => {
+      for (const [k, v] of Object.entries(saved)) v === undefined ? delete process.env[k] : (process.env[k] = v);
+    });
+};
+
+// A stand-in for `ethers`: each address answers the calls a price read makes.
+function fakeEthers(contracts) {
+  return {
+    ZeroAddress: "0x0000000000000000000000000000000000000000",
+    Contract: class {
+      constructor(address) {
+        const c = contracts[address];
+        if (!c) throw new Error(`no fake at ${address}`);
+        Object.assign(this, c);
+      }
+    },
+  };
+}
+const now = () => Math.floor(Date.now() / 1000);
+const noAave = () => Promise.reject(new Error("not an AaveOracle"));
+const feed = (answer8dp) => ({
+  BASE_CURRENCY_UNIT: noAave,
+  latestRoundData: async () => ({ answer: answer8dp, updatedAt: BigInt(now() - 60) }),
+  decimals: async () => 8n,
+});
+
+test("a pool file may carry only per-pool keys, and the shared file none of them", () => {
+  const pool = { POOL_NAME: "geth-hollar", V3_POOL: "0x9E" };
+  assert.deepEqual(poolSplitProblems(pool, { STACK: "cl2" }, {}), []);
+  assert.match(poolSplitProblems({ ...pool, KEEPER_ADDRESS: "0x1" }, {}, {})[0], /KEEPER_ADDRESS, which is shared/);
+  assert.match(poolSplitProblems(pool, { PRICE_FEED_A: "0xFB" }, {})[0], /ENV_FILE sets PRICE_FEED_A/);
+  assert.match(poolSplitProblems({ ...pool, POOL_NAME: "state" }, {}, {})[0], /not 'state'/);
+});
+
+test("every committed pool file splits cleanly and keeps customDiff above the keeper trigger", () => {
+  const shared = dotenv.parse(fs.readFileSync(path.join(__dirname, "..", ".env.pools.example")));
+  const dir = path.join(__dirname, "..", "pools");
+  const files = fs.readdirSync(dir).filter((f) => f.endsWith(".env"));
+  assert.deepEqual(files.map((f) => f.replace(".env", "")).sort(), shared.STACK_POOLS.split(",").sort());
+  for (const file of files) {
+    const pool = dotenv.parse(fs.readFileSync(path.join(dir, file)));
+    assert.deepEqual(poolSplitProblems(pool, shared, {}), [], file);
+    // runbook §1c rule 1: customDiff > trigger, always (the aDOT launch broke on 500 vs 660)
+    const trigger = Number(pool.REBALANCE_THRESHOLD_MULT) * 60;
+    assert.ok(Number(pool.MAX_TRANSLATION) > trigger, `${file}: ${pool.MAX_TRANSLATION} <= trigger ${trigger}`);
+    assert.equal(pool.LIMIT_WIDTH_MULT, pool.BASE_HALF_WIDTH_MULT, `${file}: limit spans spot to band edge`);
+    assert.ok([pool.EXPECT_TOKEN0, pool.EXPECT_TOKEN1].includes(pool.TOKEN_A), `${file}: TOKEN_A is not pinned`);
+  }
+});
+
+test("the feed side is read off the pinned order, never guessed", async () => {
+  const cases = [
+    [{ TOKEN_A: "1001", EXPECT_TOKEN0: "1001", EXPECT_TOKEN1: "222" }, true],
+    [{ TOKEN_A: "1006", EXPECT_TOKEN0: "222", EXPECT_TOKEN1: "1006" }, false],
+    [{ TOKEN_A: undefined, EXPECT_TOKEN0: undefined, EXPECT_TOKEN1: undefined }, true],
+  ];
+  // one at a time: they share process.env
+  for (const [vars, want] of cases) await withEnv(vars, () => assert.equal(feedAIsToken0(), want));
+  await withEnv({ TOKEN_A: "5", EXPECT_TOKEN0: "222", EXPECT_TOKEN1: "1006" }, () => assert.throws(feedAIsToken0, /neither/));
+});
+
+test("a HOLLAR-first pool gets the reciprocal of the asset's USD price", async () => {
+  // tBTC/USD at 83,260.1, 8 decimals
+  await withEnv({ PRICE_FEED_A: "0x000000000000000000000000000000000000FEED", TOKEN_A: "1006", EXPECT_TOKEN0: "222", EXPECT_TOKEN1: "1006", PRICE_FEED_B: undefined }, async () => {
+    const fakes = fakeEthers({ "0x000000000000000000000000000000000000FEED": feed(8_326_010_079_960n) });
+    const { priceE18 } = await resolveOraclePriceE18(fakes, {}, 43200, "0xHOLLAR", "0xATBTC");
+    // token1-per-token0 = atBTC per HOLLAR = 1 / 83,260.1
+    assert.equal(priceE18, (E18 * E18) / (83_260_100_799_600_000_000_000n));
+  });
+});
+
+test("an AaveOracle source prices the aToken's reserve and ages it by the DIA leg", async () => {
+  const ORACLE = "0x00000000000000000000000000000000000A0A0E";
+  const fakes = fakeEthers({
+    [ORACLE]: {
+      BASE_CURRENCY_UNIT: async () => 100_000_000n,
+      getAssetPrice: async (asset) => (asset === "0xRESERVE" ? 273_728_665_302n : 0n), // $2,737.28665302
+      getSourceOfAsset: async () => "0xADAPTER",
+    },
+    "0xGETH": { UNDERLYING_ASSET_ADDRESS: async () => "0xRESERVE" },
+    "0xADAPTER": { XToUsdOracle: async () => "0xETHUSD" },
+    "0xETHUSD": { latestRoundData: async () => ({ answer: 1n, updatedAt: BigInt(now() - 2374) }) },
+  });
+  await withEnv({ PRICE_FEED_A: ORACLE, TOKEN_A: "420", EXPECT_TOKEN0: "222", EXPECT_TOKEN1: "420", PRICE_FEED_B: undefined }, async () => {
+    const r = await resolveOraclePriceE18(fakes, {}, 57600, "0xHOLLAR", "0xGETH");
+    assert.equal(r.source.kind, "aave");
+    assert.equal(r.source.priceE18, 2_737_286_653_020_000_000_000n);
+    assert.ok(r.age >= 2374 && r.age < 2400, `age ${r.age}`);
+    assert.equal(r.priceE18, (E18 * E18) / 2_737_286_653_020_000_000_000n);
+    await assert.rejects(resolveOraclePriceE18(fakes, {}, 600, "0xHOLLAR", "0xGETH"), /stale/);
+  });
+});
+
+test("a pool file's records live beside, never on top of, pool 1's", async () => {
+  await withEnv({ POOL_NAME: undefined, STACK: undefined }, () => {
+    assert.equal(path.basename(statePath("mainnet")), "mainnet-state.json");
+  });
+  await withEnv({ POOL_NAME: "gsol-hollar", STACK: "cl2" }, () => {
+    assert.equal(path.basename(statePath("mainnet")), "mainnet-cl2-state.json");
+    assert.equal(path.basename(stackFile("mainnet", "cl2", "gsol-hollar")), "mainnet-cl2-gsol-hollar.json");
+  });
+  await withEnv({ POOL_NAME: "gsol-hollar", STACK: undefined }, () => assert.throws(() => statePath("mainnet"), /STACK must name/));
+});

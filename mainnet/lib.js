@@ -11,16 +11,106 @@
 const fs = require("fs");
 const path = require("path");
 
-try {
+/**
+ * The settings that describe ONE pool of a multi-pool launch. With POOL_FILE
+ * set they come from that file and nowhere else, and the shared ENV_FILE may
+ * not carry any of them — so a vault can never quietly inherit another pool's
+ * token, feed, caps or band. Same rule as uniswap-v3-deploy/mainnet/lib.js.
+ */
+const POOL_KEYS = [
+  "POOL_NAME",
+  "TOKEN_A",
+  "TOKEN_B",
+  "FEE",
+  "EXPECT_TOKEN0",
+  "EXPECT_TOKEN1",
+  "V3_POOL",
+  "VAULT_NAME",
+  "VAULT_SYMBOL",
+  "PRICE_FEED_A",
+  "PRICE_FEED_B",
+  "STALE_SECONDS",
+  "MM_UNDERLYING",
+  "MAX_TOTAL_SUPPLY",
+  "DEPOSIT0_MAX",
+  "DEPOSIT1_MAX",
+  "SEED0",
+  "SEED1",
+  "MAX_TRANSLATION",
+  "MAX_WIDTH",
+  "MIN_INTERVAL",
+  "BASE_HALF_WIDTH_MULT",
+  "LIMIT_WIDTH_MULT",
+  "LIMIT_SIDE",
+  // keeper-only strategy, copied into the pool's keeper vault file by 02-deploy.js
+  "REBALANCE_THRESHOLD_MULT",
+  "ELEVATED_HALF_WIDTH_MULT",
+  "FOLD_ENABLED",
+  "INDEXER_BASE_ASSET",
+  "INDEXER_QUOTE_ASSET",
+  "COMPOUND_ENABLED",
+  // 11-anchor-price.js derives these from the pool; a shared value would be pool 1's
+  "POOL",
+  "CROSSCHECK_ASSET0",
+  "CROSSCHECK_ASSET1",
+  "CROSSCHECK_TOKEN0",
+  "CROSSCHECK_TOKEN1",
+  "CROSSCHECK_DEC0",
+  "CROSSCHECK_DEC1",
+];
+
+/** Everything wrong with a POOL_FILE / ENV_FILE / shell split, as messages. */
+function poolSplitProblems(pool, shared, shell, poolKeys = POOL_KEYS) {
+  const problems = [];
+  if (!/^[a-z0-9][a-z0-9-]*$/.test(pool.POOL_NAME || "") || pool.POOL_NAME === "state") {
+    problems.push("POOL_FILE must set POOL_NAME to a lowercase name like atbtc-hollar (not 'state')");
+  }
+  for (const key of Object.keys(pool)) {
+    if (!poolKeys.includes(key)) problems.push(`POOL_FILE sets ${key}, which is shared — move it to ENV_FILE`);
+    else if (shell[key] !== undefined && shell[key] !== pool[key]) {
+      problems.push(`${key} is also set in the shell (${shell[key]}) — unset it, the pool file is the only source`);
+    }
+  }
+  for (const key of Object.keys(shared)) {
+    if (poolKeys.includes(key)) problems.push(`ENV_FILE sets ${key}, which is per pool — move it to the pool file`);
+  }
+  return problems;
+}
+
+/**
+ * Load the launch configuration. ENV_FILE holds the shared settings and the
+ * key; POOL_FILE, when set, holds one pool's settings (see POOL_KEYS).
+ */
+function loadEnvFiles() {
   // Keep the selected launch configuration explicit. This lets an operator run
   // `ENV_FILE=.env.mainnet npm run all` without copying a production key into
   // the default .env (which is commonly a local-fork configuration).
   const envFile = process.env.ENV_FILE
     ? path.resolve(process.cwd(), process.env.ENV_FILE)
     : path.join(__dirname, ".env");
-  require("dotenv").config({ path: envFile });
-} catch {
-  /* dotenv optional — plain env vars work too */
+  const dotenv = require("dotenv");
+  if (!process.env.POOL_FILE) {
+    dotenv.config({ path: envFile });
+    return;
+  }
+  const poolFile = path.resolve(process.cwd(), process.env.POOL_FILE);
+  const pool = dotenv.parse(fs.readFileSync(poolFile));
+  const shared = fs.existsSync(envFile) ? dotenv.parse(fs.readFileSync(envFile)) : {};
+  const problems = poolSplitProblems(pool, shared, process.env);
+  if (problems.length) throw new Error(`${poolFile}:\n    ${problems.join("\n    ")}`);
+  for (const [key, value] of Object.entries({ ...shared, ...pool })) {
+    if (process.env[key] === undefined) process.env[key] = value;
+  }
+}
+
+if (process.env.POOL_FILE) {
+  loadEnvFiles(); // a pool launch must fail loudly on a bad split
+} else {
+  try {
+    loadEnvFiles();
+  } catch {
+    /* dotenv optional — plain env vars work too */
+  }
 }
 
 const REPO = path.join(__dirname, "..");
@@ -187,26 +277,47 @@ const MIN_SQRT_RATIO = 4295128739n;
 const MAX_SQRT_RATIO = 1461446703485210103287273052203988822378723970342n;
 
 /**
+ * Whether PRICE_FEED_A prices token0.
+ *
+ * PRICE_FEED_A prices TOKEN_A, and EXPECT_TOKEN0/1 pin which side TOKEN_A sorts
+ * to — so the answer is read off the pinned order, never guessed. HOLLAR sorts
+ * FIRST in atBTC, GETH and GSOL, and an inverted price here would put a launch
+ * band or an anchor on the reciprocal. Unpinned (pool 1's anchor file) keeps the
+ * old meaning: the feed prices token0.
+ */
+function feedAIsToken0() {
+  const a = env("TOKEN_A", "1001");
+  const [e0, e1] = [env("EXPECT_TOKEN0"), env("EXPECT_TOKEN1")];
+  if (!e0 && !e1) return true;
+  if (a === e0) return true;
+  if (a === e1) return false;
+  throw new Error(`TOKEN_A ${a} is neither EXPECT_TOKEN0 ${e0} nor EXPECT_TOKEN1 ${e1}`);
+}
+
+/**
  * The feed's view of token1-per-token0, as 1e18.
  *
- * `PRICE_FEED_A` prices token0 in USD. `PRICE_FEED_B` prices token1 the same
- * way and the ratio is used; left blank, token1 is taken as the USD-pegged side
- * (HOLLAR), which is the aDOT/HOLLAR case. `00-preflight.js` carries the same
- * logic inline for its divergence note — keep the two in step.
+ * `PRICE_FEED_A` prices TOKEN_A in USD — an AggregatorV3 feed, or the money
+ * market's AaveOracle for an aToken with no feed (see readPriceE18).
+ * `PRICE_FEED_B` prices TOKEN_B the same way and the ratio is used; left blank,
+ * TOKEN_B is the USD-pegged side (HOLLAR). The result is turned to
+ * token1-per-token0 using the pinned order (feedAIsToken0).
  *
  * Throws when the feed is missing or stale: every caller uses this to decide
  * whether to move real money, so an absent answer must never read as agreement.
  */
-async function resolveOraclePriceE18(ethers, provider, staleSeconds) {
+async function resolveOraclePriceE18(ethers, provider, staleSeconds, token0, token1) {
   const feedA = env("PRICE_FEED_A");
   if (!feedA || !require("ethers").isAddress(feedA)) {
     throw new Error(`PRICE_FEED_A is unset or not an address (${feedA ?? "unset"})`);
   }
-  const a = await readFeedE18(ethers, feedA, provider, staleSeconds);
+  const E18 = 10n ** 18n;
+  const aIsToken0 = feedAIsToken0();
+  const a = await readPriceE18(ethers, feedA, provider, staleSeconds, aIsToken0 ? token0 : token1);
   const feedB = env("PRICE_FEED_B");
-  if (!feedB) return { priceE18: a.priceE18, age: a.age };
-  const b = await readFeedE18(ethers, feedB, provider, staleSeconds);
-  return { priceE18: (a.priceE18 * 10n ** 18n) / b.priceE18, age: Math.max(a.age, b.age) };
+  const b = feedB ? await readFeedE18(ethers, feedB, provider, staleSeconds) : { priceE18: E18, age: 0 };
+  const bPerA = (a.priceE18 * E18) / b.priceE18;
+  return { priceE18: aIsToken0 ? bPerA : (E18 * E18) / bPerA, age: Math.max(a.age, b.age), source: a };
 }
 
 /**
@@ -279,6 +390,8 @@ const ABI = {
     "function owner() view returns (address)",
     "function uniswapV3Factory() view returns (address)",
     "function getHypervisor(address,address,uint24) view returns (address)",
+    "function allHypervisors(uint256) view returns (address)",
+    "function allHypervisorsLength() view returns (uint256)",
     "function createHypervisor(address,address,uint24,string,string) returns (address)",
     "function transferOwnership(address)",
   ],
@@ -384,6 +497,15 @@ const ABI = {
   // A PAUSED money-market reserve makes aToken transfers revert, so the pool
   // seizes and every rebalance fails on-chain. Underlying (DOT), not the aToken.
   dataProvider: ["function getPaused(address) view returns (bool)"],
+  // The money market's oracle, for pool tokens with no USD feed of their own.
+  aaveOracle: [
+    "function BASE_CURRENCY_UNIT() view returns (uint256)",
+    "function getAssetPrice(address) view returns (uint256)",
+    "function getSourceOfAsset(address) view returns (address)",
+  ],
+  aToken: ["function UNDERLYING_ASSET_ADDRESS() view returns (address)"],
+  // A USDOracleAdapter's DIA leg; a plain feed has no such function.
+  mmSource: ["function XToUsdOracle() view returns (address)"],
 };
 
 /**
@@ -400,6 +522,35 @@ async function readFeedE18(ethers, address, provider, staleSeconds) {
   const dec = Number(decimals);
   if (dec > 18) throw new Error(`feed ${address} has ${dec} decimals, expected <= 18`);
   return { priceE18: BigInt(answer) * 10n ** BigInt(18 - dec), age, decimals: dec };
+}
+
+/**
+ * A token's USD price from `address`, which is either an AggregatorV3 feed or
+ * the money market's AaveOracle.
+ *
+ * The AaveOracle form is for aTokens with no feed of their own (GETH, GSOL): it
+ * prices the token's underlying exactly as the money market does, and takes the
+ * age from the source's DIA leg — `XToUsdOracle()` for an adapter, the source
+ * itself for a plain feed. It mirrors the keeper's resolveFeed0 / readMmFeed
+ * (keeper/src/chain.ts, oracle.ts), so the launch checks the same number the
+ * keeper's oracle gate will.
+ */
+async function readPriceE18(ethers, address, provider, staleSeconds, token) {
+  const oracle = new ethers.Contract(address, ABI.aaveOracle, provider);
+  const baseUnit = await oracle.BASE_CURRENCY_UNIT().catch(() => undefined);
+  if (baseUnit === undefined) return { ...(await readFeedE18(ethers, address, provider, staleSeconds)), kind: "feed" };
+
+  const asset = await new ethers.Contract(token, ABI.aToken, provider).UNDERLYING_ASSET_ADDRESS().catch(() => {
+    throw new Error(`${address} is an AaveOracle, but pool token ${token} is not an aToken`);
+  });
+  const [price, source] = await Promise.all([oracle.getAssetPrice(asset), oracle.getSourceOfAsset(asset)]);
+  if (source === ethers.ZeroAddress) throw new Error(`AaveOracle ${address} has no source for ${asset}`);
+  if (price <= 0n) throw new Error(`AaveOracle priced ${asset} at ${price}`);
+  const leg = await new ethers.Contract(source, ABI.mmSource, provider).XToUsdOracle().catch(() => source);
+  const round = await new ethers.Contract(leg, ABI.aggregatorV3, provider).latestRoundData();
+  const age = Math.floor(Date.now() / 1000) - Number(round.updatedAt);
+  if (age > staleSeconds) throw new Error(`price leg ${leg} behind AaveOracle is stale (${age}s old)`);
+  return { priceE18: (price * 10n ** 18n) / baseUnit, age, kind: "aave", asset, source, leg };
 }
 
 // ---------------------------------------------------------------------------
@@ -500,14 +651,45 @@ async function deployContract(ethers, wallet, name, args, overrides, confirmatio
 // Records
 // ---------------------------------------------------------------------------
 
+/**
+ * The Gamma stack a multi-pool launch shares. Required whenever a pool file is
+ * loaded, so pools 2-5 can never resume or overwrite pool 1's records.
+ */
+function stackName() {
+  const stack = env("STACK");
+  if (!/^[a-z0-9][a-z0-9-]*$/.test(stack || "")) {
+    throw new Error(`STACK must name the shared Gamma stack in ENV_FILE, e.g. cl2 (got ${stack ?? "unset"})`);
+  }
+  return stack;
+}
+
+/**
+ * `deployments/<net>-<stack>-<suffix>.json`. Flat, not a sub-directory, because
+ * mainnet/.gitignore keeps only `deployments/*.json` in the launch archive.
+ */
+function stackFile(net, stack, suffix) {
+  return path.join(__dirname, "deployments", `${net}-${stack}-${suffix}.json`);
+}
+
+/** One vault's record: `<net>.json` for pool 1, `<net>-<STACK>-<POOL_NAME>.json` for a pool file. */
 function deploymentPath(net) {
-  return path.join(__dirname, "deployments", `${net}.json`);
+  const pool = env("POOL_NAME");
+  return pool ? stackFile(net, stackName(), pool) : path.join(__dirname, "deployments", `${net}.json`);
+}
+
+/** The shared contracts' resume state: `<net>-state.json`, or `<net>-<STACK>-state.json` for a pool file. */
+function statePath(net) {
+  return env("POOL_NAME") ? stackFile(net, stackName(), "state") : path.join(__dirname, "deployments", `${net}-state.json`);
 }
 
 function loadDeployments(net) {
   const p = deploymentPath(net);
   if (!fs.existsSync(p)) throw new Error(`${p} not found — run 02-deploy.js first`);
   return JSON.parse(fs.readFileSync(p, "utf8"));
+}
+
+function saveDeployments(net, record) {
+  return saveJson(path.relative(__dirname, deploymentPath(net)), record);
 }
 
 function saveJson(rel, obj) {
@@ -521,6 +703,14 @@ function saveJson(rel, obj) {
 
 module.exports = {
   REPO,
+  POOL_KEYS,
+  poolSplitProblems,
+  feedAIsToken0,
+  readPriceE18,
+  stackName,
+  stackFile,
+  statePath,
+  saveDeployments,
   env,
   requireEnv,
   isMainnet,

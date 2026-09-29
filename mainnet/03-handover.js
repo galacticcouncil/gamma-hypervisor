@@ -26,11 +26,15 @@
  *
  * Idempotent: every step reads current state first, so it is safe to re-run.
  * SKIP_OWNERSHIP=true stops after step 5 (testnets only).
+ *
+ * Multi-pool launch (POOL_FILE set): this runs steps 1-5 only and records the
+ * vault as `configured`. Steps 6-8 then run ONCE for the whole stack, as the
+ * single last step, in 05-transfer-ownership.js — which reuses the functions
+ * exported here, so both paths move ownership with exactly the same code.
  * SKIP_PRICE_CHECK=true bypasses step 3 — a chain with no feed, or a pool whose
  * current price you have decided is the right one.
  */
 
-const path = require("path");
 const { ethers } = require("ethers");
 const {
   env,
@@ -41,7 +45,7 @@ const {
   gasOverrides,
   waitForSuccess,
   loadDeployments,
-  saveJson,
+  saveDeployments,
   resolveOraclePriceE18,
   priceE18FromSqrtPriceX96,
   sqrtPriceX96FromPriceE18,
@@ -52,59 +56,54 @@ const {
 
 const same = (a, b) => String(a).toLowerCase() === String(b).toLowerCase();
 
-async function main() {
-  const net = env("NET", "mainnet");
-  const d = loadDeployments(net);
-  const provider = new ethers.JsonRpcProvider(env("EVM_RPC_URL", d.network.evmRpc));
-  const wallet = new ethers.Wallet(requireEnv("DEPLOYER_PK"), provider);
-  const confirmations = Number(env("CONFIRMATIONS", "2"));
-  const skipOwnership = env("SKIP_OWNERSHIP", "false") === "true";
-  const governance = env("GOVERNANCE_ADDRESS", d.governance);
-  // Per-role owner targets. Unset => GOVERNANCE_ADDRESS, so an unconfigured run
-  // reproduces the single-address behaviour exactly.
-  //
-  // Why this exists: every Gamma lever is plain `onlyOwner`, so there is no
-  // narrow "emergency" capability to delegate — the only granularity available
-  // is WHICH CONTRACT a role sits on. Putting ClearingV2 on the Technical
-  // Committee's dispatch identity (0xaa7e…aa7e1, `dispatchAsEmergencyAdmin`,
-  // origin Root|TechCommitteeMajority) makes `pause(true)` a TC motion instead
-  // of a ~7-day track-9 referendum. It also hands the TC the deposit perimeter
-  // — setTwapCheck / appendList / setDepositOverride — so it is a trust
-  // decision, not a free win. Root still reaches all of these, so governance
-  // keeps full access; only the cheap track changes.
-  const roleTarget = (name) => {
+/** Contract handles for one vault record, signing with `wallet`. */
+function contractsFor(d, wallet) {
+  const g = d.gamma;
+  return {
+    g,
+    vault: new ethers.Contract(g.hypervisor, ABI.hypervisor, wallet),
+    clearing: new ethers.Contract(g.clearing, ABI.clearing, wallet),
+    uniProxy: new ethers.Contract(g.uniProxy, ABI.uniProxy, wallet),
+    admin: new ethers.Contract(g.admin, ABI.admin, wallet),
+    proxy: new ethers.Contract(g.rebalanceProxy, ABI.rebalanceProxy, wallet),
+    hyperFactory: new ethers.Contract(g.hypervisorFactory, ABI.hypervisorFactory, wallet),
+    pool: new ethers.Contract(d.uniswap.pool, ABI.pool, wallet.provider),
+  };
+}
+
+/**
+ * Per-role owner targets. Unset => GOVERNANCE_ADDRESS, so an unconfigured run
+ * reproduces the single-address behaviour exactly.
+ *
+ * Why this exists: every Gamma lever is plain `onlyOwner`, so there is no
+ * narrow "emergency" capability to delegate — the only granularity available
+ * is WHICH CONTRACT a role sits on. Putting ClearingV2 on the Technical
+ * Committee's dispatch identity (0xaa7e…aa7e1, `dispatchAsEmergencyAdmin`,
+ * origin Root|TechCommitteeMajority) makes `pause(true)` a TC motion instead
+ * of a ~7-day track-9 referendum. It also hands the TC the deposit perimeter
+ * — setTwapCheck / appendList / setDepositOverride — so it is a trust
+ * decision, not a free win. Root still reaches all of these, so governance
+ * keeps full access; only the cheap track changes.
+ */
+function roleTargetFor(governance, wallet) {
+  return (name) => {
     const v = env(name, governance);
     if (!ethers.isAddress(v || "")) throw new Error(`${name} is not an address: ${v}`);
     if (same(v, wallet.address)) throw new Error(`${name} is the deploy key — that is not a handover`);
     return ethers.getAddress(v);
   };
-  const keeper = env("KEEPER_ADDRESS", d.keeper);
-  const feeRecipient = env("FEE_RECIPIENT", d.feeRecipient || "");
-  if (!ethers.isAddress(governance || "")) throw new Error("GOVERNANCE_ADDRESS is required");
-  if (!ethers.isAddress(feeRecipient || "")) {
-    throw new Error("FEE_RECIPIENT is required — rebalance() reverts on address(0) and it is stored by that call");
-  }
-  if (isMainnet() && skipOwnership) throw new Error("SKIP_OWNERSHIP is a testnet-only escape hatch");
+}
 
-  const g = d.gamma;
-  const vault = new ethers.Contract(g.hypervisor, ABI.hypervisor, wallet);
-  const clearing = new ethers.Contract(g.clearing, ABI.clearing, wallet);
-  const uniProxy = new ethers.Contract(g.uniProxy, ABI.uniProxy, wallet);
-  const admin = new ethers.Contract(g.admin, ABI.admin, wallet);
-  const proxy = new ethers.Contract(g.rebalanceProxy, ABI.rebalanceProxy, wallet);
-  const hyperFactory = new ethers.Contract(g.hypervisorFactory, ABI.hypervisorFactory, wallet);
-  const pool = new ethers.Contract(d.uniswap.pool, ABI.pool, provider);
+/** Where each role actually went, so 04-verify.js checks the real split. */
+function roleRecord(roleTarget) {
+  return Object.fromEntries(
+    ["ADMIN_ADMIN", "CLEARING_OWNER", "UNIPROXY_OWNER", "REBALANCEPROXY_OWNER", "FACTORY_OWNER"].map((k) => [k, roleTarget(k)])
+  );
+}
 
-  const overrides = () => gasOverrides(provider);
-  const send = async (txPromise, label) => waitForSuccess(await txPromise, confirmations, label);
-
-  console.log(`=== Gamma handover: ${net} ===`);
-  console.log(`  signer     ${wallet.address}`);
-  console.log(`  governance ${governance}`);
-  console.log(`  vault      ${g.hypervisor}\n`);
-
-  // --- 1. Model B wiring --------------------------------------------------
-  console.log("[1] Model B wiring");
+// --- 1. Model B wiring ------------------------------------------------------
+async function checkWiring(c, keeper) {
+  const { g, proxy, admin } = c;
   const [proxyAdmin, proxyRebalancer, adminRebalancer, adminAdvisor, adminOwner] = await Promise.all([
     proxy.admins(g.hypervisor),
     proxy.rebalancers(g.hypervisor),
@@ -130,13 +129,15 @@ async function main() {
   }
   const caps = await Promise.all([proxy.customDiff(g.hypervisor), proxy.customWidth(g.hypervisor), proxy.customInterval(g.hypervisor)]);
   console.log(`    caps: maxTranslation=${caps[0]} maxWidth=${caps[1]} minInterval=${caps[2]}s`);
-  if (caps.some((c) => c === 0n)) throw new Error("a proxy cap is 0, which falls back to the shared global default — set all three");
+  if (caps.some((cap) => cap === 0n)) throw new Error("a proxy cap is 0, which falls back to the shared global default — set all three");
   console.log("    wiring complete");
+}
 
-  // --- 2. ClearingV2 guards ----------------------------------------------
-  // After step 7 only a referendum can change these, so this is the last cheap
-  // chance to notice a mismatch with the reviewed configuration.
-  console.log("\n[2] ClearingV2 guards");
+// --- 2. ClearingV2 guards ---------------------------------------------------
+// After ownership moves only a referendum can change these, so this is the last
+// cheap chance to notice a mismatch with the reviewed configuration.
+async function checkGuards(c, d, walletAddress, roleTarget) {
+  const { g, clearing } = c;
   const [twapCheck, twapInterval, priceThreshold, position, clearingOwner] = await Promise.all([
     clearing.twapCheck(),
     clearing.twapInterval(),
@@ -161,10 +162,97 @@ async function main() {
   if (guardProblems.length) {
     throw new Error("ClearingV2 is not launch-ready:\n    " + guardProblems.join("\n    "));
   }
-  if (!same(clearingOwner, wallet.address) && !same(clearingOwner, roleTarget("CLEARING_OWNER"))) {
+  if (!same(clearingOwner, walletAddress) && !same(clearingOwner, roleTarget("CLEARING_OWNER"))) {
     throw new Error(`ClearingV2 owner is ${clearingOwner} — neither this key nor CLEARING_OWNER`);
   }
   console.log("    guards are launch-ready");
+  return { twapInterval, priceThreshold };
+}
+
+// --- 6. vault owner = Admin -------------------------------------------------
+async function transferVault(c, wallet, tx) {
+  const { g, vault } = c;
+  const currentOwner = await vault.owner();
+  if (same(currentOwner, g.admin)) {
+    console.log("    vault already owned by Admin");
+  } else if (same(currentOwner, wallet.address)) {
+    await tx.send(vault.transferOwnership(g.admin, await tx.overrides()), `hypervisor.transferOwnership(${g.admin})`);
+  } else {
+    throw new Error(`vault owned by ${currentOwner}, not this key — cannot transfer`);
+  }
+}
+
+// --- 7. peripheral owners = governance --------------------------------------
+async function transferPeripherals(c, wallet, tx, roleTarget, governance) {
+  const { clearing, uniProxy, proxy, hyperFactory } = c;
+  const transfers = [
+    ["ClearingV2", roleTarget("CLEARING_OWNER"), () => clearing.owner(), async (t) => clearing.transferOwnership(t, await tx.overrides())],
+    ["UniProxy", roleTarget("UNIPROXY_OWNER"), () => uniProxy.owner(), async (t) => uniProxy.transferOwnership(t, await tx.overrides())],
+    ["RebalanceProxy", roleTarget("REBALANCEPROXY_OWNER"), () => proxy.owner(), async (t) => proxy.transferOwner(t, await tx.overrides())],
+    ["HypervisorFactory", roleTarget("FACTORY_OWNER"), () => hyperFactory.owner(), async (t) => hyperFactory.transferOwnership(t, await tx.overrides())],
+  ];
+  for (const [label, target, read, write] of transfers) {
+    const current = await read();
+    const note = same(target, governance) ? "" : "  (NOT the default governance address)";
+    if (same(current, target)) {
+      console.log(`    ${label} already owned by ${target}${note}`);
+    } else if (same(current, wallet.address)) {
+      await tx.send(write(target), `${label}.transferOwnership(${target})${note}`);
+    } else {
+      throw new Error(`${label} owner is ${current} — neither this key nor its configured target ${target}`);
+    }
+  }
+}
+
+// --- 8. Admin.admin = governance (LAST) -------------------------------------
+async function transferAdmin(c, wallet, tx, roleTarget, governance) {
+  const { admin } = c;
+  const finalAdmin = await admin.admin();
+  if (same(finalAdmin, governance)) {
+    console.log("    Admin already held by governance");
+  } else if (same(finalAdmin, wallet.address)) {
+    await tx.send(admin.transferAdmin(roleTarget("ADMIN_ADMIN"), await tx.overrides()), `admin.transferAdmin(${roleTarget("ADMIN_ADMIN")}) — this key is now retired`);
+  } else {
+    throw new Error(`Admin.admin is ${finalAdmin}, not this key — cannot transfer`);
+  }
+}
+
+async function main() {
+  const net = env("NET", "mainnet");
+  const d = loadDeployments(net);
+  const provider = new ethers.JsonRpcProvider(env("EVM_RPC_URL", d.network.evmRpc));
+  const wallet = new ethers.Wallet(requireEnv("DEPLOYER_PK"), provider);
+  const confirmations = Number(env("CONFIRMATIONS", "2"));
+  const skipOwnership = env("SKIP_OWNERSHIP", "false") === "true";
+  const governance = env("GOVERNANCE_ADDRESS", d.governance);
+  const roleTarget = roleTargetFor(governance, wallet);
+  const keeper = env("KEEPER_ADDRESS", d.keeper);
+  const feeRecipient = env("FEE_RECIPIENT", d.feeRecipient || "");
+  if (!ethers.isAddress(governance || "")) throw new Error("GOVERNANCE_ADDRESS is required");
+  if (!ethers.isAddress(feeRecipient || "")) {
+    throw new Error("FEE_RECIPIENT is required — rebalance() reverts on address(0) and it is stored by that call");
+  }
+  if (isMainnet() && skipOwnership) throw new Error("SKIP_OWNERSHIP is a testnet-only escape hatch");
+
+  const c = contractsFor(d, wallet);
+  const { g, vault, clearing, pool } = c;
+
+  const tx = {
+    overrides: () => gasOverrides(provider),
+    send: async (txPromise, label) => waitForSuccess(await txPromise, confirmations, label),
+  };
+  const { overrides, send } = tx;
+
+  console.log(`=== Gamma handover: ${net} ===`);
+  console.log(`  signer     ${wallet.address}`);
+  console.log(`  governance ${governance}`);
+  console.log(`  vault      ${g.hypervisor}\n`);
+
+  console.log("[1] Model B wiring");
+  await checkWiring(c, keeper);
+
+  console.log("\n[2] ClearingV2 guards");
+  const { twapInterval, priceThreshold } = await checkGuards(c, d, wallet.address, roleTarget);
 
   // --- 3. pool price sanity -----------------------------------------------
   //
@@ -200,7 +288,7 @@ async function main() {
     // and DIA's measured max age (7.4h) sits close to the 8h default.
     let oracle;
     try {
-      oracle = await resolveOraclePriceE18(ethers, provider, Number(env("STALE_SECONDS", "28800")));
+      oracle = await resolveOraclePriceE18(ethers, provider, Number(env("STALE_SECONDS", "28800")), d.uniswap.token0, d.uniswap.token1);
     } catch (error) {
       throw new Error(
         `cannot read the price feed, so the pool price cannot be checked: ${error.message}\n` +
@@ -286,64 +374,35 @@ async function main() {
     throw new Error(`whitelist is ${whitelisted}, not UniProxy, and this key no longer owns the vault`);
   }
 
+  if (env("POOL_NAME")) {
+    // never downgrade: a re-run after 05-transfer-ownership.js is a no-op on chain
+    d.config = { ...(d.config || {}), posture: d.config?.posture === "production" ? "production" : "configured" };
+    console.log(`\n  Wrote ${saveDeployments(net, d)}`);
+    console.log("\n=== CONFIGURED — every owner role is still with the deploy key ===");
+    console.log("  Configure every pool in STACK_POOLS the same way, then move ownership once, last:");
+    console.log("    ENV_FILE=<shared> npm run transfer-ownership");
+    return;
+  }
+
   if (skipOwnership) {
     console.log("\n[6-8] SKIP_OWNERSHIP=true — every owner role left with the deploy key");
     return;
   }
 
-  // --- 6. vault owner = Admin --------------------------------------------
   console.log("\n[6] vault ownership");
-  const currentOwner = await vault.owner();
-  if (same(currentOwner, g.admin)) {
-    console.log("    vault already owned by Admin");
-  } else if (same(currentOwner, wallet.address)) {
-    await send(vault.transferOwnership(g.admin, await overrides()), `hypervisor.transferOwnership(${g.admin})`);
-  } else {
-    throw new Error(`vault owned by ${currentOwner}, not this key — cannot transfer`);
-  }
+  await transferVault(c, wallet, tx);
 
-  // --- 7. peripheral owners = governance ---------------------------------
   console.log("\n[7] peripheral ownership -> governance");
-  const transfers = [
-    ["ClearingV2", roleTarget("CLEARING_OWNER"), () => clearing.owner(), async (t) => clearing.transferOwnership(t, await overrides())],
-    ["UniProxy", roleTarget("UNIPROXY_OWNER"), () => uniProxy.owner(), async (t) => uniProxy.transferOwnership(t, await overrides())],
-    ["RebalanceProxy", roleTarget("REBALANCEPROXY_OWNER"), () => proxy.owner(), async (t) => proxy.transferOwner(t, await overrides())],
-    ["HypervisorFactory", roleTarget("FACTORY_OWNER"), () => hyperFactory.owner(), async (t) => hyperFactory.transferOwnership(t, await overrides())],
-  ];
-  for (const [label, target, read, write] of transfers) {
-    const current = await read();
-    const note = same(target, governance) ? "" : "  (NOT the default governance address)";
-    if (same(current, target)) {
-      console.log(`    ${label} already owned by ${target}${note}`);
-    } else if (same(current, wallet.address)) {
-      await send(write(target), `${label}.transferOwnership(${target})${note}`);
-    } else {
-      throw new Error(`${label} owner is ${current} — neither this key nor its configured target ${target}`);
-    }
-  }
+  await transferPeripherals(c, wallet, tx, roleTarget, governance);
 
-  // --- 8. Admin.admin = governance (LAST) --------------------------------
   console.log("\n[8] Admin");
-  const finalAdmin = await admin.admin();
-  if (same(finalAdmin, governance)) {
-    console.log("    Admin already held by governance");
-  } else if (same(finalAdmin, wallet.address)) {
-    await send(admin.transferAdmin(roleTarget("ADMIN_ADMIN"), await overrides()), `admin.transferAdmin(${roleTarget("ADMIN_ADMIN")}) — this key is now retired`);
-  } else {
-    throw new Error(`Admin.admin is ${finalAdmin}, not this key — cannot transfer`);
-  }
+  await transferAdmin(c, wallet, tx, roleTarget, governance);
 
   d.config = { ...(d.config || {}), posture: "production" };
   // Record where each role actually went, so 04-verify.js checks the real split
   // instead of assuming one governance address for all five.
-  d.roles = {
-    ADMIN_ADMIN: roleTarget("ADMIN_ADMIN"),
-    CLEARING_OWNER: roleTarget("CLEARING_OWNER"),
-    UNIPROXY_OWNER: roleTarget("UNIPROXY_OWNER"),
-    REBALANCEPROXY_OWNER: roleTarget("REBALANCEPROXY_OWNER"),
-    FACTORY_OWNER: roleTarget("FACTORY_OWNER"),
-  };
-  const p = saveJson(path.join("deployments", `${net}.json`), d);
+  d.roles = roleRecord(roleTarget);
+  const p = saveDeployments(net, d);
   console.log(`\n  Wrote ${p}`);
   console.log("\n=== PRODUCTION posture ===");
   console.log(`  Keeper config: ENTRYPOINT=proxy REBALANCE_PROXY=${g.rebalanceProxy} VAULT=${g.hypervisor} ADMIN_ADDRESS=${g.admin}`);
@@ -353,7 +412,20 @@ async function main() {
   console.log("  ClearingV2 rejects any deposit taken while the tick sits outside that band.");
 }
 
-main().catch((e) => {
-  console.error("\n  Handover FAILED:", e.message, "\n");
-  process.exit(1);
-});
+module.exports = {
+  contractsFor,
+  roleTargetFor,
+  roleRecord,
+  checkWiring,
+  checkGuards,
+  transferVault,
+  transferPeripherals,
+  transferAdmin,
+};
+
+if (require.main === module) {
+  main().catch((e) => {
+    console.error("\n  Handover FAILED:", e.message, "\n");
+    process.exit(1);
+  });
+}
