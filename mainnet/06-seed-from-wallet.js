@@ -8,9 +8,10 @@
  *
  * Run it after 05-transfer-ownership.js, with the keeper running. The deposit
  * goes through UniProxy, so ClearingV2's guards apply exactly as they will to
- * any LP. The tokens then sit idle in the vault until the keeper's next
- * rebalance mints them. Compounding stays off: a sweep tips the whole idle
- * balance into the pool at spot, which is what a sandwich waits for.
+ * any LP. The tokens land idle in the vault; the keeper sees shares with
+ * nothing in the pool and re-centers once, which mints them (about 30 minutes,
+ * the dwell, in a calm regime; an elevated one waits for calm). Compounding stays off: a sweep tips the whole idle balance into
+ * the pool at spot on a timer, which is what a sandwich waits for.
  * SEED_TO receives the LP shares and defaults to the seeding wallet.
  */
 
@@ -34,6 +35,8 @@ async function main() {
   console.log(`  seeder ${seeder.address}`);
   console.log(`  vault  ${d.gamma.hypervisor}\n`);
   const { seed0, seed1, to, minIn } = await checkSeed(provider, d, seeder.address, seeder.address);
+  const toSeeder = to.toLowerCase() === seeder.address.toLowerCase();
+  console.log(`  LP shares go to ${to}${toSeeder ? " (the seeding wallet)" : " — SEED_TO, not the seeding wallet"}`);
   if (checkOnly) {
     console.log("\n=== --check: the seed would clear; nothing was sent ===");
     return;
@@ -58,7 +61,7 @@ async function main() {
   const vault = new ethers.Contract(d.gamma.hypervisor, ABI.hypervisor, provider);
   const [shares, supply] = await Promise.all([vault.balanceOf(to), vault.totalSupply()]);
   console.log(`\n  ${to} holds ${fmtUnits(shares, 18)} shares; vault supply ${fmtUnits(supply, 18)}`);
-  console.log("=== seeded — the tokens sit idle in the vault until the keeper's next rebalance mints them ===");
+  console.log("=== seeded — the keeper mints it into the pool after its dwell (~30 min if calm); watch for `rebalanced` ===");
 }
 
 main().catch((e) => {

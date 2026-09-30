@@ -175,7 +175,8 @@ async function main() {
   }
   console.log("\n=== PRODUCTION posture for every pool — ownership moved, last step done ===");
   console.log("  Next, per pool: ENV_FILE=<shared> POOL_FILE=pools/<pool>.env npm run verify");
-  console.log("  Then seed it: npm run governance -- seed (treasury), or SEEDER_PK=0x… npm run seed-wallet");
+  console.log("  Start the keeper with the new vault files, then seed: npm run governance -- seed (treasury),");
+  console.log("  or SEEDER_PK=0x… npm run seed-wallet. The keeper mints each seed into its pool after its dwell.");
 }
 
 main().catch((e) => {

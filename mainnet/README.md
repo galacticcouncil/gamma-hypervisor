@@ -286,10 +286,18 @@ ENV_FILE=.env.pools npm run transfer-ownership
 # per pool
 ENV_FILE=.env.pools POOL_FILE=pools/atbtc-hollar.env npm run verify
 ENV_FILE=.env.pools POOL_FILE=pools/atbtc-hollar.env npm run governance -- seed        # treasury seed: a track-5 proposal
-# ...or skip the treasury and seed from a wallet you control (same SEED0/SEED1/SEED_TO, same checks)
+# ...or skip the treasury and seed from a wallet you control (same SEED0/SEED1, same checks)
 ENV_FILE=.env.pools POOL_FILE=pools/atbtc-hollar.env SEEDER_PK=0x… npm run seed-wallet -- --check
 ENV_FILE=.env.pools POOL_FILE=pools/atbtc-hollar.env SEEDER_PK=0x… npm run seed-wallet
 ```
+
+- The seed lands idle. Compounding stays off (a timed sweep is a sandwich
+  target), so the keeper mints it with one ordinary re-center once it sees
+  shares with nothing in the pool, after its dwell (~30 min in a calm regime;
+  an elevated one exceeds the proxy's width cap, so it waits for calm). Start
+  the keeper with this vault's file before seeding.
+- `SEED_TO` unset: the LP shares go to whoever pays, the treasury or the
+  seeding wallet. `seed-wallet -- --check` prints where they will go.
 
 - Records: `deployments/<net>-<STACK>-state.json` for the shared contracts,
   `<net>-<STACK>-<pool>.json` per vault. Pool 1's `mainnet.json` is never touched.
@@ -304,6 +312,10 @@ ENV_FILE=.env.pools POOL_FILE=pools/atbtc-hollar.env SEEDER_PK=0x… npm run see
   `keeper/vaults/<net>-<STACK>/<pool>.json`. Commit them, rebuild the keeper
   image, and list them after `vaults/mainnet/adot-hollar.json` in `VAULTS_FILE`,
   after the ownership transfer: the keeper rebalances through Admin.
+- The vault files do not set `ORACLE_MAX_DEV_TICKS`, so the new vaults take
+  whatever the running keeper stack has (runbook §3, §5.13). Read it from the
+  keeper's startup banner (`oracle … (maxDev N, maxAge Ns)`) and decide it is
+  right for these bands before adding the files.
 
 ## Rehearsing on a chopsticks fork of mainnet
 

@@ -176,7 +176,7 @@ async function checkSeed(provider, d, from, defaultTo) {
   }
   // `minIn` only binds when `directDeposit` is on, which the launch posture
   // forbids: deposits sit in the vault's idle balance until the keeper's next
-  // rebalance or compound mints them, and those calls carry their own bounds.
+  // rebalance mints them (a seed triggers one), and that call carries its own bounds.
   const minIn = [0, 0, 0, 0];
   try {
     await clearing.clearDeposit(seed0, seed1, from, to, g.hypervisor, minIn);

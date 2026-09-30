@@ -357,12 +357,14 @@ function checkSeedAndCaps(poolInfo) {
       : note("SEED0/SEED1 unset; the seed proposal cannot be generated yet");
     return;
   }
-  if (!ethers.isAddress(seedTo || "")) {
-    fail("SEED_TO must be the EVM address that receives the LP shares");
+  // Unset is fine: the shares then go to whoever pays for the seed.
+  if (seedTo !== undefined && !ethers.isAddress(seedTo)) {
+    fail(`SEED_TO is not an address: ${seedTo}`);
   }
   pass(
     `seed ${fmtUnits(seed0, poolInfo.t0.decimals)} ${poolInfo.t0.symbol} + ` +
-      `${fmtUnits(seed1, poolInfo.t1.decimals)} ${poolInfo.t1.symbol} -> ${seedTo}`
+      `${fmtUnits(seed1, poolInfo.t1.decimals)} ${poolInfo.t1.symbol} -> ` +
+      (seedTo || "whoever seeds (the treasury, or the seeding wallet)")
   );
 
   if (d0max && seed0 > d0max) fail(`SEED0 ${seed0} exceeds DEPOSIT0_MAX ${d0max} — the seed would revert as "token0 exceeds"`);
