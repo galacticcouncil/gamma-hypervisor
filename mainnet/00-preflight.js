@@ -22,6 +22,9 @@ const {
   fmtUnits,
   loadArtifact,
   resolveOraclePriceE18,
+  feedAIsToken0,
+  usdOfRaw,
+  fmtUsd,
   ABI,
 } = require("./lib");
 
@@ -386,6 +389,29 @@ function checkSeedAndCaps(poolInfo) {
   if (spread > 2_000n) note("seed is heavily one-sided; the excess side lands in the limit position, not the base");
 }
 
+/**
+ * The caps in dollars at the feed price. Shares count token1 (the first deposit
+ * mints deposit1 + deposit0 × price), so where HOLLAR is token0 one share is one
+ * unit of the ASSET — a "$150k" cap typed as 150,000 shares on atBTC is ~$12.5B.
+ */
+function printCapsInUsd(poolInfo, token1PerToken0E18, usdAE18) {
+  const E18 = 10n ** 18n;
+  const aIs0 = feedAIsToken0();
+  const usdB = aIs0 ? (usdAE18 * E18) / token1PerToken0E18 : (token1PerToken0E18 * usdAE18) / E18;
+  const [usd0, usd1] = aIs0 ? [usdAE18, usdB] : [usdB, usdAE18];
+  const { t0, t1 } = poolInfo;
+  console.log(`  shares count ${t1.symbol}: 1 share ≈ ${fmtUsd(usdOfRaw(10n ** BigInt(t1.decimals), usd1, t1.decimals))} at the feed price`);
+  const caps = [
+    ["MAX_TOTAL_SUPPLY", env("MAX_TOTAL_SUPPLY"), usd1, t1.decimals, "shares"],
+    ["DEPOSIT0_MAX", env("DEPOSIT0_MAX"), usd0, t0.decimals, t0.symbol],
+    ["DEPOSIT1_MAX", env("DEPOSIT1_MAX"), usd1, t1.decimals, t1.symbol],
+  ];
+  for (const [key, raw, usd, decimals, unit] of caps) {
+    if (!raw) continue;
+    console.log(`  ${key} ${fmtUnits(BigInt(raw), decimals)} ${unit} ≈ ${fmtUsd(usdOfRaw(raw, usd, decimals))}`);
+  }
+}
+
 async function checkPriceAndMarket(provider, poolInfo) {
   head("price feed and money market");
   const stale = numberIn("STALE_SECONDS", 1, 7 * 24 * 60 * 60, "28800");
@@ -414,6 +440,7 @@ async function checkPriceAndMarket(provider, poolInfo) {
       divergence <= BigInt(env("MAX_DIVERGENCE_BPS", "200"))
         ? pass(`pool/feed divergence ${divergence} bps`)
         : note(`pool/feed divergence ${divergence} bps — investigate before seeding into it`);
+      printCapsInUsd(poolInfo, oracle, source.priceE18);
     } catch (error) {
       fail(`PRICE_FEED_A cannot supply a fresh price: ${error.message}`);
     }

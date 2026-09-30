@@ -46,6 +46,7 @@ const POOL_KEYS = [
   "REBALANCE_THRESHOLD_MULT",
   "ELEVATED_HALF_WIDTH_MULT",
   "FOLD_ENABLED",
+  "MINS_TOLERANCE_BPS",
   "INDEXER_BASE_ASSET",
   "INDEXER_QUOTE_ASSET",
   "COMPOUND_ENABLED",
@@ -338,6 +339,12 @@ const fmtE18 = (x) => {
 };
 
 const fmtUnits = (x, decimals) => require("ethers").formatUnits(x, Number(decimals));
+
+/** USD value (1e18 fixed) of a raw token amount, given that token's USD price (1e18 fixed). */
+const usdOfRaw = (amountRaw, usdE18, decimals) => (BigInt(amountRaw) * BigInt(usdE18)) / 10n ** BigInt(decimals);
+
+/** A 1e18 fixed USD amount as "$12,345.67". */
+const fmtUsd = (usdE18) => `$${(Number(usdE18 / 10n ** 16n) / 100).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
 /**
  * Shares `Hypervisor.deposit` mints for the FIRST deposit into an empty vault.
@@ -733,6 +740,8 @@ module.exports = {
   firstDepositShares,
   fmtE18,
   fmtUnits,
+  usdOfRaw,
+  fmtUsd,
   ABI,
   readFeedE18,
   resolveOraclePriceE18,

@@ -87,7 +87,7 @@ test("priceE18FromSqrtPriceX96 is decimals-aware for a 10dp/18dp pair", () => {
 const fs = require("node:fs");
 const path = require("node:path");
 const dotenv = require("dotenv");
-const { poolSplitProblems, feedAIsToken0, resolveOraclePriceE18, stackFile, statePath } = require("../lib");
+const { poolSplitProblems, feedAIsToken0, resolveOraclePriceE18, stackFile, statePath, usdOfRaw, fmtUsd } = require("../lib");
 
 const E18 = 10n ** 18n;
 const withEnv = (vars, fn) => {
@@ -146,6 +146,9 @@ test("every committed pool file splits cleanly and keeps customDiff above the ke
     assert.ok(Number(pool.MAX_TRANSLATION) > trigger, `${file}: ${pool.MAX_TRANSLATION} <= trigger ${trigger}`);
     assert.equal(pool.LIMIT_WIDTH_MULT, pool.BASE_HALF_WIDTH_MULT, `${file}: limit spans spot to band edge`);
     assert.ok([pool.EXPECT_TOKEN0, pool.EXPECT_TOKEN1].includes(pool.TOKEN_A), `${file}: TOKEN_A is not pinned`);
+    // the keeper's slippage bound keeps aDOT's headroom: ~1000 bps at mult 16, so ~16000/mult
+    const want = 16000 / Number(pool.BASE_HALF_WIDTH_MULT);
+    assert.ok(Math.abs(Number(pool.MINS_TOLERANCE_BPS) - want) / want < 0.05, `${file}: MINS_TOLERANCE_BPS vs ${want}`);
   }
 });
 
@@ -201,4 +204,12 @@ test("a pool file's records live beside, never on top of, pool 1's", async () =>
     assert.equal(path.basename(stackFile("mainnet", "cl2", "gsol-hollar")), "mainnet-cl2-gsol-hollar.json");
   });
   await withEnv({ POOL_NAME: "gsol-hollar", STACK: undefined }, () => assert.throws(() => statePath("mainnet"), /STACK must name/));
+});
+
+test("a share cap reads in dollars of token1, which is the asset when HOLLAR sorts first", () => {
+  const cap = 150_000n * E18; // 150,000 shares
+  // atBTC/HOLLAR: token1 is atBTC at $83,512.26 — the same number is ~$12.5B, not $150k
+  assert.equal(fmtUsd(usdOfRaw(cap, 83_512_255_695_000_000_000_000n, 18)), "$12,526,838,354.25");
+  // aPAXG/HOLLAR: token1 is HOLLAR at $1 — 150,000 shares is $150k
+  assert.equal(fmtUsd(usdOfRaw(cap, E18, 18)), "$150,000.00");
 });
