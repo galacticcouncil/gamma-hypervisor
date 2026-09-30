@@ -8,8 +8,9 @@
  *
  * Run it after 05-transfer-ownership.js, with the keeper running. The deposit
  * goes through UniProxy, so ClearingV2's guards apply exactly as they will to
- * any LP. The tokens then sit idle in the vault until the keeper compounds or
- * rebalances: turn COMPOUND_ENABLED on for this pool once it is seeded.
+ * any LP. The tokens then sit idle in the vault until the keeper's next
+ * rebalance mints them. Compounding stays off: a sweep tips the whole idle
+ * balance into the pool at spot, which is what a sandwich waits for.
  * SEED_TO receives the LP shares and defaults to the seeding wallet.
  */
 
@@ -57,7 +58,7 @@ async function main() {
   const vault = new ethers.Contract(d.gamma.hypervisor, ABI.hypervisor, provider);
   const [shares, supply] = await Promise.all([vault.balanceOf(to), vault.totalSupply()]);
   console.log(`\n  ${to} holds ${fmtUnits(shares, 18)} shares; vault supply ${fmtUnits(supply, 18)}`);
-  console.log("=== seeded — the tokens sit idle until the keeper compounds: set COMPOUND_ENABLED=true for this pool ===");
+  console.log("=== seeded — the tokens sit idle in the vault until the keeper's next rebalance mints them ===");
 }
 
 main().catch((e) => {
