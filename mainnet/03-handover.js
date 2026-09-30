@@ -407,7 +407,8 @@ async function main() {
   console.log("\n=== PRODUCTION posture ===");
   console.log(`  Keeper config: ENTRYPOINT=proxy REBALANCE_PROXY=${g.rebalanceProxy} VAULT=${g.hypervisor} ADMIN_ADDRESS=${g.admin}`);
   console.log("  The vault is live, empty and capped. Seed it with:");
-  console.log(`    ENV_FILE=<file> npm run governance -- seed`);
+  console.log(`    ENV_FILE=<file> npm run governance -- seed        (treasury proposal)`);
+  console.log(`    ENV_FILE=<file> SEEDER_PK=0x… npm run seed-wallet (or from a wallet)`);
   console.log("  Start the keeper BEFORE the seed: it keeps the band centred on the tick, and");
   console.log("  ClearingV2 rejects any deposit taken while the tick sits outside that band.");
 }

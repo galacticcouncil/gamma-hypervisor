@@ -285,7 +285,10 @@ ENV_FILE=.env.pools npm run transfer-ownership -- --check              # read-on
 ENV_FILE=.env.pools npm run transfer-ownership
 # per pool
 ENV_FILE=.env.pools POOL_FILE=pools/atbtc-hollar.env npm run verify
-ENV_FILE=.env.pools POOL_FILE=pools/atbtc-hollar.env npm run governance -- seed
+ENV_FILE=.env.pools POOL_FILE=pools/atbtc-hollar.env npm run governance -- seed        # treasury seed: a track-5 proposal
+# ...or skip the treasury and seed from a wallet you control (same SEED0/SEED1/SEED_TO, same checks)
+ENV_FILE=.env.pools POOL_FILE=pools/atbtc-hollar.env SEEDER_PK=0x… npm run seed-wallet -- --check
+ENV_FILE=.env.pools POOL_FILE=pools/atbtc-hollar.env SEEDER_PK=0x… npm run seed-wallet
 ```
 
 - Records: `deployments/<net>-<STACK>-state.json` for the shared contracts,
