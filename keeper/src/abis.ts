@@ -9,6 +9,7 @@ export const HYPERVISOR_ABI = [
   'function limitLower() view returns (int24)',
   'function limitUpper() view returns (int24)',
   'function currentTick() view returns (int24)',
+  'function totalSupply() view returns (uint256)',
   'function getTotalAmounts() view returns (uint256 total0, uint256 total1)',
   'function getBasePosition() view returns (uint128 liquidity, uint256 amount0, uint256 amount1)',
   'function getLimitPosition() view returns (uint128 liquidity, uint256 amount0, uint256 amount1)',

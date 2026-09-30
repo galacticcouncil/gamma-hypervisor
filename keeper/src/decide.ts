@@ -97,6 +97,27 @@ export function shouldRefreshLimit(i: RefreshInput): Trigger {
   };
 }
 
+export interface SeedInput {
+  baseLiquidity: bigint;
+  limitLiquidity: bigint;
+  /** Vault shares outstanding: above zero once anyone has deposited. */
+  totalSupply: bigint;
+}
+
+/**
+ * Whether the vault holds deposits that were never put into the pool: shares
+ * exist, but neither range holds liquidity. That is a fresh seed. A deposit
+ * never enters the pool by itself (`directDeposit` is off, and the first
+ * deposit skips it regardless), and with compounding off nothing else mints
+ * it: the drift trigger needs trades, an empty pool gets none, and refresh and
+ * fold need a limit position. The caller answers it with an ordinary re-center.
+ */
+export function shouldDeploySeed(i: SeedInput): Trigger {
+  if (i.totalSupply === 0n) return { trigger: false, reason: 'no deposits' };
+  if (i.baseLiquidity > 0n || i.limitLiquidity > 0n) return { trigger: false, reason: 'already in the pool' };
+  return { trigger: true, reason: `${i.totalSupply} shares idle with nothing in the pool — deploying the seed` };
+}
+
 export interface FoldInput {
   /** Limit-position legs, BOTH valued in token1 terms (value0 = amount0 × price). */
   limitValue0: number;

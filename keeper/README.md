@@ -87,7 +87,7 @@ fire, push the pool price with a large swap, then wait `DWELL_SECS`.
 ## How it decides (each block)
 
 1. read `pool.slot0()` (spot tick) and the vault's `baseLower/baseUpper`;
-2. **trigger** if spot left the band, or drifted more than `REBALANCE_THRESHOLD_MULT × tickSpacing` from its center; with no drift trigger, a stranded limit fires a **limit refresh** (`LIMIT_REFRESH_ENABLED`), and a half-traversed one fires a **fold at balance** (`FOLD_ENABLED`) — both zero-translation rebalances that leave the base ticks alone;
+2. **trigger** if spot left the band, or drifted more than `REBALANCE_THRESHOLD_MULT × tickSpacing` from its center, or the vault holds shares with nothing in the pool — a fresh **seed**, which with compounding off nothing else would ever mint (`shouldDeploySeed`); with no trigger, a stranded limit fires a **limit refresh** (`LIMIT_REFRESH_ENABLED`), and a half-traversed one fires a **fold at balance** (`FOLD_ENABLED`) — both zero-translation rebalances that leave the base ticks alone;
 3. **dwell** — the trigger must hold continuously for `DWELL_SECS`;
 4. **cooldown** — `MIN_INTERVAL_SECS`, and the proxy's on-chain `minInterval`;
 5. **TWAP gate** — window clamped to the pool's actual history; skip if `|spot − TWAP| > MAX_DEV_TICKS`. The TWAP tick becomes the **placement** tick;
@@ -478,6 +478,13 @@ a normal market as a crash.
 Harvest fees, re-mint the same ticks. It does not move the band, so it is not
 bound by the proxy's `minInterval` — and its cadence sets how often the fee
 recipient is actually paid.
+
+**Off on the mainnet stack** (`COMPOUND_ENABLED=false`), for the reason below.
+A seed does not need it: a vault with shares and nothing in the pool fires an
+ordinary re-center (step 2 above), behind the dwell, cooldown, price gates and
+mins every rebalance has. The same trigger re-mints a vault that governance
+emptied with `Admin.pullLiquidity`, so to keep one out of the pool, remove it
+from the keeper's `VAULTS_FILE` first.
 
 Runs through `Admin.compound`, which is **onlyAdvisor** — a different role from
 the rebalancer. The deploy scripts set the keeper as advisor via
