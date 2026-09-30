@@ -14,6 +14,9 @@ RUN npm ci
 
 COPY tsconfig.json ./
 COPY src ./src
+# Per-pool vault files, so a VAULTS_FILE list resolves inside the container and
+# each image tag carries exactly the reviewed set.
+COPY vaults ./vaults
 
 # Config comes from the environment. `import 'dotenv/config'` in src/config.ts
 # loads a .env when one exists but never overrides an already-set variable, so

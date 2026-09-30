@@ -42,6 +42,10 @@ services:
       # --- chain + identity ---
       RPC_URL: https://rpc.hydradx.cloud
       VAULT: '0xa206D0959813f17c17C87147271C49065438648A'
+      # Pools 2-5 in the same process: one vault file per pool, baked into the
+      # image under /app/vaults. A list replaces VAULT above as a vault of its own,
+      # so pool 1's file goes first; the rest of this environment stays the defaults.
+      # VAULTS_FILE: vaults/mainnet/adot-hollar.json,vaults/mainnet-cl2/atbtc-hollar.json,vaults/mainnet-cl2/apaxg-hollar.json,vaults/mainnet-cl2/geth-hollar.json,vaults/mainnet-cl2/gsol-hollar.json
 
       # Model B: signer is the revocable rebalancer; every call goes through
       # RebalanceProxy. The vault is owned by Admin (after handover).
