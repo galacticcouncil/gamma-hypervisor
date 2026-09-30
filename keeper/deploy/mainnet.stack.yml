@@ -119,8 +119,8 @@ services:
       VOL_BASELINE_DAYS: '30'
       VOL_BASELINE_REFRESH_SECS: '3600'
 
-      # Off until the vault is seeded: compounding an empty vault reverts and
-      # logs a failed sweep every interval. Flip to true after the seed.
+      # Off on purpose: a sweep tips the whole idle balance into the pool at
+      # spot, which is what a sandwich waits for. Rebalances mint idle tokens.
       COMPOUND_ENABLED: 'false'
       COMPOUND_INTERVAL_SECS: '3600'
 
