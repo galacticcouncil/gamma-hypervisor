@@ -83,7 +83,8 @@ async function verify() {
   const keeper = env("KEEPER_ADDRESS", d.keeper);
   const handedOver = env("EXPECT_POSTURE", d.config?.posture ?? "production") === "production";
 
-  console.log(`=== Verifying Gamma: ${net} (expecting the ${handedOver ? "PRODUCTION" : "BOOTSTRAP"} posture) ===`);
+  const posture = d.config?.posture ?? "production";
+  console.log(`=== Verifying Gamma: ${net} (recorded ${posture}; expecting ${handedOver ? "governance" : "the deploy key"} to own every contract) ===`);
   if (d.network.chainId && network.chainId.toString() !== d.network.chainId) {
     fail(`chain ID ${network.chainId}; deployment record is for ${d.network.chainId}`);
   } else {

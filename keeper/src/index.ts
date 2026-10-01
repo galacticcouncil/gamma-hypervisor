@@ -11,6 +11,7 @@ import {
 import { initialState, startKeeper } from './keeper';
 import { log } from './log';
 import { startStatus, status } from './status';
+import { isMmFeed } from './oracle';
 
 async function main(): Promise<void> {
   installProcessHandlers();
@@ -78,7 +79,7 @@ function vaultBanner(ctx: VaultCtx, blockTimeSecs: number): void {
     }`,
   );
   ctx.log(`  gates        twap ${cfg.TWAP_ENABLED ? `on (${cfg.TWAP_WINDOW_SECS}s, maxDev ${cfg.MAX_DEV_TICKS})` : 'OFF'}, dwell ${dwell.secs}s, minInterval ${cfg.MIN_INTERVAL_SECS}s`);
-  ctx.log(`  oracle       ${cfg.ORACLE_ENABLED ? `${cfg.ORACLE_FEED0}${cfg.ORACLE_FEED1 ? ` / ${cfg.ORACLE_FEED1}` : ' (token1 = USD side)'} (maxDev ${cfg.ORACLE_MAX_DEV_TICKS}, maxAge ${cfg.ORACLE_MAX_AGE_SECS}s)` : 'off'}`);
+  ctx.log(`  oracle       ${cfg.ORACLE_ENABLED ? `${cfg.ORACLE_FEED0}${ctx.oracle && isMmFeed(ctx.oracle.feed0) ? ` (MM, asset ${ctx.oracle.feed0.asset})` : ''}${cfg.ORACLE_FEED1 ? ` / ${cfg.ORACLE_FEED1}` : ' (token1 = USD side)'} (maxDev ${cfg.ORACLE_MAX_DEV_TICKS}, maxAge ${cfg.ORACLE_MAX_AGE_SECS}s)` : 'off'}`);
   ctx.log(`  mins         ${cfg.MINS_TOLERANCE_BPS} bps tolerance`);
   ctx.log(`  compound     ${cfg.COMPOUND_ENABLED ? `every ${cfg.COMPOUND_INTERVAL_SECS}s via Admin ${cfg.ADMIN_ADDRESS}, bounded` : 'off'}`);
 

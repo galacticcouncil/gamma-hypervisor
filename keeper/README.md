@@ -87,7 +87,7 @@ fire, push the pool price with a large swap, then wait `DWELL_SECS`.
 ## How it decides (each block)
 
 1. read `pool.slot0()` (spot tick) and the vault's `baseLower/baseUpper`;
-2. **trigger** if spot left the band, or drifted more than `REBALANCE_THRESHOLD_MULT × tickSpacing` from its center; with no drift trigger, a stranded limit fires a **limit refresh** (`LIMIT_REFRESH_ENABLED`), and a half-traversed one fires a **fold at balance** (`FOLD_ENABLED`) — both zero-translation rebalances that leave the base ticks alone;
+2. **trigger** if spot left the band, or drifted more than `REBALANCE_THRESHOLD_MULT × tickSpacing` from its center, or the vault holds shares with nothing in the pool — a fresh **seed**, which with compounding off nothing else would ever mint (`shouldDeploySeed`); with no trigger, a stranded limit fires a **limit refresh** (`LIMIT_REFRESH_ENABLED`), and a half-traversed one fires a **fold at balance** (`FOLD_ENABLED`) — both zero-translation rebalances that leave the base ticks alone;
 3. **dwell** — the trigger must hold continuously for `DWELL_SECS`;
 4. **cooldown** — `MIN_INTERVAL_SECS`, and the proxy's on-chain `minInterval`;
 5. **TWAP gate** — window clamped to the pool's actual history; skip if `|spot − TWAP| > MAX_DEV_TICKS`. The TWAP tick becomes the **placement** tick;
@@ -128,7 +128,7 @@ fire, push the pool price with a large swap, then wait `DWELL_SECS`.
 | `MINS_TOLERANCE_BPS` | `1000` | slippage bound per leg |
 | **oracle clamp** | | |
 | `ORACLE_ENABLED` | `false` | require agreement with an external feed |
-| `ORACLE_FEED0` / `ORACLE_FEED1` | — | Chainlink AggregatorV3 **addresses**, one per pair; omit `FEED1` if token1 is the USD side |
+| `ORACLE_FEED0` / `ORACLE_FEED1` | — | Chainlink AggregatorV3 **addresses**, one per pair; omit `FEED1` if token1 is the USD side. `FEED0` may instead be the MM's `AaveOracle` (see below) |
 | `ORACLE_MAX_AGE_SECS` | `600` | reject staler feeds |
 | `ORACLE_MAX_DEV_TICKS` | `200` | max pool-vs-oracle deviation (~2%) |
 | **operations** | | |
@@ -146,6 +146,30 @@ fire, push the pool price with a large swap, then wait `DWELL_SECS`.
 
 `MAX_DEV_TICKS`/`ORACLE_MAX_DEV_TICKS` are in ticks: **1 tick ≈ 1 basis point**, so
 100 ticks ≈ 1%.
+
+### Wrapper and share tokens: `ORACLE_FEED0` = the money market's oracle
+
+GETH and GSOL have no USD feed of their own; the money market prices them through a
+`USDOracleAdapter` = stableswap EMA precompile (share -> underlying) × DIA underlying/USD.
+Point `ORACLE_FEED0` at the `AaveOracle` (mainnet `0xAD33C0F0C42C5A0EAA65b5895D2BdB20cb6E8760`)
+and the keeper reads that price rather than rebuilding it. The kind of address is
+detected once at startup; anything that is neither a feed nor an `AaveOracle` fails there.
+
+- **price:** `AaveOracle.getAssetPrice(asset)`, `asset` = the `FEED0_SIDE` pool token's
+  `UNDERLYING_ASSET_ADDRESS()` — the MM's own number, following any change of source.
+- **age:** `updatedAt` of the source's DIA leg — `XToUsdOracle()` for an adapter, the
+  source itself for a plain feed. The adapter's own `latestTimestamp()` is the current
+  block and its `latestRoundData()` reverts, so it is never asked.
+
+| pool token | MM asset | MM source | age leg |
+|---|---|---|---|
+| GETH | 2-POOL-GETH `0x…0100001068` | adapter `0x32CC…9E90` | ETH/USD `0x1AF5…594b` |
+| GSOL | 2-POOL-GSOL `0x…0100015f91` | adapter `0xCD36…Ed9A` | SOL/USD `0x2FAA…0D2C` |
+| aDOT | DOT `0x…0100000005` | DOT/USD `0xFBCa…6702` | itself |
+
+The DIA legs run on the same slow cadence as DOT's (GETH/GSOL read 37-50 min old), so
+use the deploy's `ORACLE_MAX_AGE_SECS=28800`; 600s skips nearly every rebalance.
+`npm run smoke` prints the resolved asset, source and age leg.
 
 ### Fold at balance (`FOLD_ENABLED`)
 
@@ -216,12 +240,15 @@ meaning and becomes the default *for every vault*. On top of that:
 | var | meaning |
 |---|---|
 | `VAULTS_JSON` | a JSON **array** of per-vault override objects, inline |
-| `VAULTS_FILE` | a path to a file containing that same array |
+| `VAULTS_FILE` | a path to a file containing that same array — or several paths, comma-separated, each file holding one vault object (one file per pool) |
 
 `VAULTS_FILE` wins if both are set — a file is the deliberate, reviewable form, and
 a leftover inline `VAULTS_JSON` must not quietly beat it. **With neither set the
 keeper synthesises a one-element list from `VAULT`**, so an existing single-vault
-deployment runs unchanged.
+deployment runs unchanged. Once a list is set, the flat `VAULT` is no longer a
+vault of its own: to keep aDOT/HOLLAR in the same process, list it first.
+On mainnet the list is `deploy/vaults.mainnet.json`, mounted as a swarm config
+at `/run/vaults.json` — never baked into the image.
 
 Each array element is a *partial*: it is merged over the defaults and then validated
 with the same refinements, **per vault**. A key set to JSON `null` drops the
@@ -235,7 +262,11 @@ error — two contexts on one vault would race each other for the signer's nonce
   { "VAULT": "0x1234…5678",                                    // 0.05% tier: spacing 10,
     "BASE_HALF_WIDTH_MULT": 96,                                //   so a different multiple
     "REBALANCE_THRESHOLD_MULT": 66,
-    "ORACLE_FEED0": "0xFBCa0A6dC5B74C042DF23025D99ef0F1fcAC6702" }
+    "ORACLE_FEED0": "0xFBCa0A6dC5B74C042DF23025D99ef0F1fcAC6702" },
+  { "VAULT": "0xGETH…vault",                                   // GETH/HOLLAR: HOLLAR is token0
+    "ORACLE_FEED0_SIDE": "token1",
+    "ORACLE_FEED0": "0xAD33C0F0C42C5A0EAA65b5895D2BdB20cb6E8760", // AaveOracle
+    "ORACLE_MAX_AGE_SECS": 28800 }
 ]
 ```
 
@@ -453,6 +484,13 @@ a normal market as a crash.
 Harvest fees, re-mint the same ticks. It does not move the band, so it is not
 bound by the proxy's `minInterval` — and its cadence sets how often the fee
 recipient is actually paid.
+
+**Off on the mainnet stack** (`COMPOUND_ENABLED=false`), for the reason below.
+A seed does not need it: a vault with shares and nothing in the pool fires an
+ordinary re-center (step 2 above), behind the dwell, cooldown, price gates and
+mins every rebalance has. The same trigger re-mints a vault that governance
+emptied with `Admin.pullLiquidity`, so to keep one out of the pool, remove it
+from the keeper's `VAULTS_FILE` first.
 
 Runs through `Admin.compound`, which is **onlyAdvisor** — a different role from
 the rebalancer. The deploy scripts set the keeper as advisor via

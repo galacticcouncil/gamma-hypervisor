@@ -119,19 +119,16 @@ async function assertAaveManagerUnchanged(api) {
 }
 
 /**
- * The treasury seed: two approvals and one UniProxy deposit, as one batch.
- *
- * The approval target is the HYPERVISOR, not UniProxy. `UniProxy.deposit` calls
- * `Hypervisor.deposit(..., from = msg.sender)` and the Hypervisor then does
- * `safeTransferFrom(from, address(this))` — so the allowance the runtime needs
- * is treasury -> Hypervisor. Approving UniProxy instead compiles, submits,
- * enacts, and reverts.
+ * Everything a seed must satisfy before it is sent, from whichever address
+ * sends it: the treasury (this script's proposal) or a wallet
+ * (06-seed-from-wallet.js). Returns the amounts, recipient and minIn to use.
  */
-async function seedCall(api, provider, d) {
+async function checkSeed(provider, d, from, defaultTo) {
   const g = d.gamma;
+  const who = from.toLowerCase() === TREASURY_EVM ? "treasury" : from;
   const seed0 = BigInt(env("SEED0", "0"));
   const seed1 = BigInt(env("SEED1", "0"));
-  const to = env("SEED_TO", TREASURY_EVM);
+  const to = env("SEED_TO", defaultTo);
   if (seed0 <= 0n || seed1 <= 0n) {
     throw new Error("SEED0 and SEED1 must both be > 0 — clearDeposit requires a deposit on both sides");
   }
@@ -144,17 +141,17 @@ async function seedCall(api, provider, d) {
     token1.decimals(),
     token0.symbol(),
     token1.symbol(),
-    token0.balanceOf(TREASURY_EVM),
-    token1.balanceOf(TREASURY_EVM),
+    token0.balanceOf(from),
+    token1.balanceOf(from),
   ]);
-  console.log(`  treasury holds ${fmtUnits(bal0, dec0)} ${sym0} / ${fmtUnits(bal1, dec1)} ${sym1}`);
+  console.log(`  ${who} holds ${fmtUnits(bal0, dec0)} ${sym0} / ${fmtUnits(bal1, dec1)} ${sym1}`);
   // The treasury's aDOT balance is the usual shortfall: it is minted by
   // supplying DOT to the Aave market, not held by default.
   if (bal0 < seed0) {
-    throw new Error(`treasury holds ${fmtUnits(bal0, dec0)} ${sym0}, seed needs ${fmtUnits(seed0, dec0)}`);
+    throw new Error(`${who} holds ${fmtUnits(bal0, dec0)} ${sym0}, seed needs ${fmtUnits(seed0, dec0)}`);
   }
   if (bal1 < seed1) {
-    throw new Error(`treasury holds ${fmtUnits(bal1, dec1)} ${sym1}, seed needs ${fmtUnits(seed1, dec1)}`);
+    throw new Error(`${who} holds ${fmtUnits(bal1, dec1)} ${sym1}, seed needs ${fmtUnits(seed1, dec1)}`);
   }
 
   // Prove the deposit clears BEFORE the referendum, not after enactment.
@@ -179,10 +176,10 @@ async function seedCall(api, provider, d) {
   }
   // `minIn` only binds when `directDeposit` is on, which the launch posture
   // forbids: deposits sit in the vault's idle balance until the keeper's next
-  // rebalance or compound mints them, and those calls carry their own bounds.
+  // rebalance mints them (a seed triggers one), and that call carries its own bounds.
   const minIn = [0, 0, 0, 0];
   try {
-    await clearing.clearDeposit(seed0, seed1, TREASURY_EVM, to, g.hypervisor, minIn);
+    await clearing.clearDeposit(seed0, seed1, from, to, g.hypervisor, minIn);
     console.log("  clearDeposit dry-run passes against current state");
   } catch (error) {
     throw new Error(`clearDeposit would revert: ${error.shortMessage || error.message}`);
@@ -198,6 +195,21 @@ async function seedCall(api, provider, d) {
       throw new Error(`seed would mint ${shares} shares over maxTotalSupply ${cap} — clearShares reverts the whole call`);
     }
   }
+  return { seed0, seed1, to, minIn };
+}
+
+/**
+ * The treasury seed: two approvals and one UniProxy deposit, as one batch.
+ *
+ * The approval target is the HYPERVISOR, not UniProxy. `UniProxy.deposit` calls
+ * `Hypervisor.deposit(..., from = msg.sender)` and the Hypervisor then does
+ * `safeTransferFrom(from, address(this))` — so the allowance the runtime needs
+ * is treasury -> Hypervisor. Approving UniProxy instead compiles, submits,
+ * enacts, and reverts.
+ */
+async function seedCall(api, provider, d) {
+  const g = d.gamma;
+  const { seed0, seed1, to, minIn } = await checkSeed(provider, d, TREASURY_EVM, TREASURY_EVM);
 
   const approveGas = env("SEED_APPROVE_GAS", "800000");
   // aDOT is an Aave aToken: its transferFrom runs finalizeTransfer and measured
@@ -396,7 +408,7 @@ async function main() {
 
 // The chopsticks rehearsal imports these so it injects the SAME encoding the
 // referendum will carry. A rehearsal of a different encoder proves nothing.
-module.exports = { seedCall, capsCall, feeCall, pauseCall, recenterCall, pullCall, TRACK, AAVE_MANAGER_EVM, TREASURY_EVM };
+module.exports = { seedCall, checkSeed, capsCall, feeCall, pauseCall, recenterCall, pullCall, TRACK, AAVE_MANAGER_EVM, TREASURY_EVM };
 
 if (require.main === module) {
   main().catch((error) => {

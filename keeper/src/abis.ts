@@ -9,6 +9,7 @@ export const HYPERVISOR_ABI = [
   'function limitLower() view returns (int24)',
   'function limitUpper() view returns (int24)',
   'function currentTick() view returns (int24)',
+  'function totalSupply() view returns (uint256)',
   'function getTotalAmounts() view returns (uint256 total0, uint256 total1)',
   'function getBasePosition() view returns (uint128 liquidity, uint256 amount0, uint256 amount1)',
   'function getLimitPosition() view returns (uint128 liquidity, uint256 amount0, uint256 amount1)',
@@ -60,3 +61,22 @@ export const AGGREGATOR_V3_ABI = [
   'function decimals() view returns (uint8)',
   'function description() view returns (string)',
 ];
+
+// The money market's price oracle, keyed by reserve asset (an aToken's
+// UNDERLYING_ASSET_ADDRESS()), answering in BASE_CURRENCY_UNIT (USD, 1e8).
+export const AAVE_ORACLE_ABI = [
+  'function getAssetPrice(address asset) view returns (uint256)',
+  'function getSourceOfAsset(address asset) view returns (address)',
+  'function BASE_CURRENCY_UNIT() view returns (uint256)',
+];
+
+// A source behind the MM oracle: a plain feed (DOT/USD) or a USDOracleAdapter
+// (GETH, GSOL) = assetToX (EMA precompile) × XToUsd (DIA feed). The adapter
+// reverts on latestRoundData() and its latestTimestamp() is the current block,
+// so age is read from its XToUsdOracle() leg instead.
+export const MM_SOURCE_ABI = [
+  ...AGGREGATOR_V3_ABI,
+  'function XToUsdOracle() view returns (address)',
+];
+
+export const ATOKEN_ABI = ['function UNDERLYING_ASSET_ADDRESS() view returns (address)'];

@@ -1,7 +1,7 @@
 import { ethers } from 'ethers';
 import type { Chain, ProxyCaps, VaultCtx } from './chain';
 import { readLastRebalanceTs, readProxyCaps } from './chain';
-import { shouldFold, shouldRebalance, shouldRefreshLimit, type Trigger } from './decide';
+import { shouldDeploySeed, shouldFold, shouldRebalance, shouldRefreshLimit, type Trigger } from './decide';
 import { centeredBand, clampBandTranslation, limitRange } from './ticks';
 import { oldestObservationAgeSecs, readSlot0, readTwapTick } from './pool';
 import { readIdleBalances, readPositions, readTotalAmounts, surplusSide } from './vault';
@@ -395,13 +395,28 @@ export async function evaluate(
 
   // Trigger on spot: has price actually left the band / drifted from its center?
   // WHERE the band goes is decided later, from the TWAP, once the gates have run.
-  const decision = shouldRebalance({
+  let decision = shouldRebalance({
     spotTick,
     baseLower,
     baseUpper,
     tickSpacing: ctx.tickSpacing,
     rebalanceThresholdMult: cfg.REBALANCE_THRESHOLD_MULT,
   });
+
+  // A seed lands idle in the vault and nothing else would ever mint it (see
+  // shouldDeploySeed), so it takes the re-center path: same dwell, cooldown,
+  // price gates and mins. Read only when the limit is empty, so a vault that
+  // is already in the pool pays no extra call per block.
+  const limitLiquidity = BigInt(limitPos.liquidity.toString());
+  if (!decision.trigger && baseUpper > baseLower && limitLiquidity === 0n) {
+    const [basePos, supply] = await Promise.all([vault.getBasePosition(), vault.totalSupply()]);
+    const seed = shouldDeploySeed({
+      baseLiquidity: BigInt(basePos.liquidity.toString()),
+      limitLiquidity,
+      totalSupply: BigInt(supply.toString()),
+    });
+    if (seed.trigger) decision = seed;
+  }
 
   // Limit refresh: re-place a stranded limit next to the price, base unchanged.
   // Subordinate to the drift trigger — a full re-center re-places the limit
@@ -413,7 +428,7 @@ export async function evaluate(
           spotTick,
           limitLower: Number(limitLower0),
           limitUpper: Number(limitUpper0),
-          limitLiquidity: BigInt(limitPos.liquidity.toString()),
+          limitLiquidity,
           refreshTicks: cfg.LIMIT_REFRESH_TICKS,
         })
       : { trigger: false, reason: 'refresh disabled, no base, or drift trigger active' };
@@ -532,7 +547,8 @@ export async function evaluate(
       '  OPERATOR ACTION: the keeper cannot pull liquidity — Admin.pullLiquidity is\n' +
         '    onlyRebalancer and the RebalanceProxy holds that role. To pull, the Admin\n' +
         '    holder (governance) must: 1) Admin.setRebalancer(vault, <signer>)\n' +
-        '    2) Admin.pullLiquidity(vault, ...) 3) Admin.setRebalancer(vault, <proxy>)',
+        '    2) Admin.pullLiquidity(vault, ...) 3) Admin.setRebalancer(vault, <proxy>)\n' +
+        '    4) drop the vault from VAULTS_FILE, or the keeper re-mints it once calm',
     );
     return;
   }

@@ -270,6 +270,53 @@ leaving them keeps the whole Model B story theoretical. That key could:
   calls. Same for `Admin.addBaseLiquidity` / `addLimitLiquidity` — no such
   functions exist on the Hypervisor.
 
+## Pools 2-5: one stack, four vaults, ownership last
+
+A fresh Gamma stack, named by `STACK`, holds one vault per file in `pools/`.
+The deploy key does every setting; ownership moves once, last, for all of them.
+`.env.pools` holds only the shared settings and the key.
+
+```bash
+cp .env.pools.example .env.pools                                      # set DEPLOYER_PK
+# per pool, once its uniswap-v3-deploy pool exists and its caps/seed are set (runbook §7)
+ENV_FILE=.env.pools ./launch-pool.sh pools/atbtc-hollar.env            # preflight, deploy the vault, configure it
+# once, when every pool in STACK_POOLS is configured
+ENV_FILE=.env.pools npm run transfer-ownership -- --check              # read-only
+ENV_FILE=.env.pools npm run transfer-ownership
+# per pool
+ENV_FILE=.env.pools POOL_FILE=pools/atbtc-hollar.env npm run verify
+ENV_FILE=.env.pools POOL_FILE=pools/atbtc-hollar.env npm run governance -- seed        # treasury seed: a track-5 proposal
+# ...or skip the treasury and seed from a wallet you control (same SEED0/SEED1, same checks)
+ENV_FILE=.env.pools POOL_FILE=pools/atbtc-hollar.env SEEDER_PK=0x… npm run seed-wallet -- --check
+ENV_FILE=.env.pools POOL_FILE=pools/atbtc-hollar.env SEEDER_PK=0x… npm run seed-wallet
+```
+
+- The seed lands idle. Compounding stays off (a timed sweep is a sandwich
+  target), so the keeper mints it with one ordinary re-center once it sees
+  shares with nothing in the pool, after its dwell (~30 min in a calm regime;
+  an elevated one exceeds the proxy's width cap, so it waits for calm). Start
+  the keeper with this vault's file before seeding.
+- `SEED_TO` unset: the LP shares go to whoever pays, the treasury or the
+  seeding wallet. `seed-wallet -- --check` prints where they will go.
+
+- Records: `deployments/<net>-<STACK>-state.json` for the shared contracts,
+  `<net>-<STACK>-<pool>.json` per vault. Pool 1's `mainnet.json` is never touched.
+- With a pool file, `03-handover.js` stops after the launch band and whitelist
+  (`configured`). `05-transfer-ownership.js` refuses unless the factory holds
+  exactly `STACK_POOLS`, each still configured; then vaults → Admin, shared
+  contracts → governance, Admin last, and it fails if the deploy key keeps any role.
+- Price drifted since the pool was created: `ENV_FILE=.env.anchor
+  POOL_FILE=pools/<pool>.env node 11-anchor-price.js`. That anchor env holds only
+  the key, RPC and gas settings.
+- `02-deploy.js` writes each pool's keeper file to
+  `keeper/vaults/<net>-<STACK>/<pool>.json`. Commit them, add them to
+  `keeper/deploy/vaults.mainnet.json` after pool 1, and ship that as a new swarm
+  config version, after the ownership transfer: the keeper rebalances through Admin.
+- The vault files do not set `ORACLE_MAX_DEV_TICKS`, so the new vaults take
+  whatever the running keeper stack has (runbook §3, §5.13). Read it from the
+  keeper's startup banner (`oracle … (maxDev N, maxAge Ns)`) and decide it is
+  right for these bands before adding the files.
+
 ## Rehearsing on a chopsticks fork of mainnet
 
 `10-chopsticks-rehearsal.js` drives the whole flow against a local fork and

@@ -105,7 +105,9 @@ const Env = z
     // through AggregatorV3 and every mainnet feed reverts on getValue(). One
     // contract per pair, so feeds are ADDRESSES, not key strings.
     ORACLE_ENABLED: boolEnv(false),
-    ORACLE_FEED0: addr.optional(), // the volatile side's USD feed, e.g. DOT/USD
+    // the volatile side's USD feed (DOT/USD), or the MM's AaveOracle for a
+    // wrapper/share token with no feed of its own (GETH, GSOL).
+    ORACLE_FEED0: addr.optional(),
     ORACLE_FEED1: addr.optional(), // the other side's USD feed; omit if it is USD-pegged
     // Which pool side ORACLE_FEED0 prices. The pool tick is token1-per-token0, so
     // a feed on token1 must be inverted. Wrong value = oracle tick thousands of
@@ -475,32 +477,47 @@ function parseVault(raw: RawEnv, where: string): Config {
   };
 }
 
-function readVaultList(): Record<string, unknown>[] | undefined {
-  // VAULTS_FILE wins: a file is the deliberate, reviewable form, and a leftover
-  // inline VAULTS_JSON in a stack file must not quietly beat it.
-  const file = process.env.VAULTS_FILE;
-  const inline = process.env.VAULTS_JSON;
-  const [src, where] = file
-    ? [readFileSync(file, 'utf8'), `VAULTS_FILE ${file}`]
-    : inline
-      ? [inline, 'VAULTS_JSON']
-      : [undefined, ''];
-  if (src === undefined) return undefined;
+/** One per-vault override and where it came from, for error messages. */
+type VaultEntry = { override: Record<string, unknown>; label: string };
 
+function parseVaultList(src: string, where: string, allowObject: boolean): VaultEntry[] {
   let parsed: unknown;
   try {
     parsed = JSON.parse(src);
   } catch (e: any) {
     throw new Error(`${where}: not valid JSON (${e?.message ?? e})`);
   }
-  if (!Array.isArray(parsed)) throw new Error(`${where}: expected a JSON array of vault objects`);
+  // A per-pool file may hold its one vault as a bare object.
+  if (allowObject && typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+    return [{ override: parsed as Record<string, unknown>, label: where }];
+  }
+  if (!Array.isArray(parsed)) {
+    throw new Error(`${where}: expected a JSON array of vault objects${allowObject ? ', or one vault object' : ''}`);
+  }
   if (parsed.length === 0) throw new Error(`${where}: empty vault list`);
   return parsed.map((v, i) => {
     if (typeof v !== 'object' || v === null || Array.isArray(v)) {
       throw new Error(`${where}[${i}]: expected an object of per-vault overrides`);
     }
-    return v as Record<string, unknown>;
+    return { override: v as Record<string, unknown>, label: `${where}[${i}]` };
   });
+}
+
+function readVaultList(): VaultEntry[] | undefined {
+  // VAULTS_FILE wins: a file is the deliberate, reviewable form, and a leftover
+  // inline VAULTS_JSON in a stack file must not quietly beat it. It may name
+  // several files, comma-separated — one per pool, so each pool's settings live
+  // and are reviewed on their own — read in the order given.
+  const files = process.env.VAULTS_FILE;
+  if (files) {
+    return files
+      .split(',')
+      .map((f) => f.trim())
+      .filter(Boolean)
+      .flatMap((f) => parseVaultList(readFileSync(f, 'utf8'), `VAULTS_FILE ${f}`, true));
+  }
+  const inline = process.env.VAULTS_JSON;
+  return inline ? parseVaultList(inline, 'VAULTS_JSON', false) : undefined;
 }
 
 /**
@@ -511,16 +528,11 @@ function readVaultList(): Record<string, unknown>[] | undefined {
  */
 export function loadKeeperConfig(): KeeperConfig {
   const defaults = rawDefaults();
-  const overrides = readVaultList() ?? [{}]; // no list: the flat env IS the one vault
-  const where = process.env.VAULTS_FILE
-    ? `VAULTS_FILE ${process.env.VAULTS_FILE}`
-    : process.env.VAULTS_JSON
-      ? 'VAULTS_JSON'
-      : 'env';
+  // no list: the flat env IS the one vault
+  const entries = readVaultList() ?? [{ override: {}, label: 'config' }];
 
-  const vaults = overrides.map((o, i) => {
-    const label = overrides.length === 1 && where === 'env' ? 'config' : `${where}[${i}]`;
-    const merged = mergeVault(defaults, o, label);
+  const vaults = entries.map(({ override, label }) => {
+    const merged = mergeVault(defaults, override, label);
     const cfg = parseVault(merged, `${label}${merged.VAULT ? ` (${merged.VAULT})` : ''}`);
     return cfg;
   });
@@ -531,7 +543,7 @@ export function loadKeeperConfig(): KeeperConfig {
     const first = seen.get(key);
     if (first !== undefined) {
       throw new Error(
-        `duplicate vault address ${v.VAULT} at ${where}[${first}] and ${where}[${i}] — ` +
+        `duplicate vault address ${v.VAULT} at ${entries[first].label} and ${entries[i].label} — ` +
           'two contexts on one vault would race each other for the signer nonce',
       );
     }

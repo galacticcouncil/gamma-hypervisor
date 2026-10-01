@@ -55,6 +55,17 @@ const ABI = {
   ],
   clearing: ['function paused() view returns (bool)'],
   feed: ['function latestRoundData() view returns (uint80,int256,uint256,uint256,uint80)', 'function decimals() view returns (uint8)'],
+  mmOracle: [
+    'function BASE_CURRENCY_UNIT() view returns (uint256)',
+    'function getAssetPrice(address) view returns (uint256)',
+    'function getSourceOfAsset(address) view returns (address)',
+  ],
+  mmSource: [
+    'function latestRoundData() view returns (uint80,int256,uint256,uint256,uint80)',
+    'function XToUsdOracle() view returns (address)',
+  ],
+  poolTokens: ['function token0() view returns (address)', 'function token1() view returns (address)'],
+  aToken: ['function UNDERLYING_ASSET_ADDRESS() view returns (address)'],
 };
 
 // --- price math, per-pool decimals instead of the aDOT/HOLLAR 1e-8 literal ----
@@ -128,6 +139,49 @@ async function readFeed(feed: ethers.Contract): Promise<{ usd: number; ts: numbe
   const usd = Number(ethers.utils.formatUnits(answer, Number(dec)));
   if (!(usd > 0) || !Number.isFinite(usd)) throw new Error(`feed ${feed.address} price not usable: ${usd}`);
   return { usd, ts: Number(rd[3]) };
+}
+
+// the keeper's resolveFeed0: ORACLE_FEED0 may be the money market's AaveOracle,
+// which prices the pool token's underlying instead of exposing latestRoundData.
+// settled once per feed+pool, like the keeper does at startup.
+type MmRef = { baseUnit: ethers.BigNumber; asset: string };
+const mmRefs = new Map<string, MmRef | null>();
+
+async function mmRef(feed: string, pool: Pool, p: ethers.providers.Provider): Promise<MmRef | null> {
+  const k = `${feed}:${pool.pool}:${pool.feed0Side}`.toLowerCase();
+  if (mmRefs.has(k)) return mmRefs.get(k)!;
+  const baseUnit = await new ethers.Contract(feed, ABI.mmOracle, p).BASE_CURRENCY_UNIT().catch(() => undefined);
+  let ref: MmRef | null = null;
+  if (baseUnit) {
+    const pc = new ethers.Contract(pool.pool, ABI.poolTokens, p);
+    const side: string = pool.feed0Side === 'token0' ? await pc.token0() : await pc.token1();
+    const asset: string = await new ethers.Contract(side, ABI.aToken, p).UNDERLYING_ASSET_ADDRESS();
+    ref = { baseUnit: ethers.BigNumber.from(baseUnit), asset };
+  }
+  mmRefs.set(k, ref);
+  return ref;
+}
+
+async function readMmFeed(feed: string, ref: MmRef, p: ethers.providers.Provider): Promise<{ usd: number; ts: number }> {
+  const oracle = new ethers.Contract(feed, ABI.mmOracle, p);
+  const [price, source] = await Promise.all([oracle.getAssetPrice(ref.asset), oracle.getSourceOfAsset(ref.asset)]);
+  if (source === ethers.constants.AddressZero) throw new Error(`MM oracle has no source for ${ref.asset}`);
+  const raw = ethers.BigNumber.from(price);
+  if (raw.lte(0)) throw new Error(`MM oracle priced ${ref.asset} at ${raw.toString()}`);
+  const usd = Number(raw.toString()) / Number(ref.baseUnit.toString());
+  if (!(usd > 0) || !Number.isFinite(usd)) throw new Error(`MM price for ${ref.asset} not usable: ${usd}`);
+  const src = new ethers.Contract(source, ABI.mmSource, p);
+  let ageFeed = src;
+  try {
+    ageFeed = new ethers.Contract(await src.XToUsdOracle(), ABI.mmSource, p);
+  } catch {}
+  const rd = await ageFeed.latestRoundData();
+  return { usd, ts: Number(rd[3]) };
+}
+
+async function readFeed0(feed: string, pool: Pool, p: ethers.providers.Provider): Promise<{ usd: number; ts: number }> {
+  const ref = await mmRef(feed, pool, p);
+  return ref ? readMmFeed(feed, ref, p) : readFeed(new ethers.Contract(feed, ABI.feed, p));
 }
 
 /** per-pool carry-over between cycles. */
@@ -236,7 +290,7 @@ export async function runChecks(
   let feedPx: number | null = null, bps: number | null = null, age: number | null = null;
   let oracleTick: number | null = null, twapTick: number | null = null, devTicks: number | null = null;
   if (pool.feed) {
-    const a = await readFeed(new ethers.Contract(pool.feed, ABI.feed, p));
+    const a = await readFeed0(pool.feed, pool, p);
     const b = pool.feed1 ? await readFeed(new ethers.Contract(pool.feed1, ABI.feed, p)) : null;
     // the stalest feed sets the age, so a fresh one cannot mask a frozen one
     age = now - Math.min(a.ts, b?.ts ?? a.ts);

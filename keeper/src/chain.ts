@@ -1,8 +1,9 @@
 import { ethers } from 'ethers';
-import { AGGREGATOR_V3_ABI, ERC20_ABI, HYPERVISOR_ABI, POOL_ABI, REBALANCE_PROXY_ABI } from './abis';
+import { AAVE_ORACLE_ABI, AGGREGATOR_V3_ABI, ATOKEN_ABI, MM_SOURCE_ABI, ERC20_ABI, HYPERVISOR_ABI, POOL_ABI, REBALANCE_PROXY_ABI } from './abis';
 import { resolveDwellSecs, type Config, type GlobalConfig } from './config';
 import { blankState, type KeeperState } from './state';
 import { log, logTagged } from './log';
+import type { MmFeed } from './oracle';
 
 /**
  * The process-wide half: one RPC connection, one signer, one nonce.
@@ -41,7 +42,7 @@ export interface VaultCtx {
   token0: ethers.Contract;
   token1: ethers.Contract;
   proxy?: ethers.Contract; // ENTRYPOINT=proxy (Model B)
-  oracle?: { feed0: ethers.Contract; feed1?: ethers.Contract }; // ORACLE_ENABLED
+  oracle?: { feed0: ethers.Contract | MmFeed; feed1?: ethers.Contract }; // ORACLE_ENABLED
   tickSpacing: number;
   decimals0: number;
   decimals1: number;
@@ -87,6 +88,33 @@ export async function measureBlockTimeSecs(
     log(`warn: could not measure block time (${e?.message ?? e}) — assuming ${fallbackSecs}s`);
     return fallbackSecs;
   }
+}
+
+// ORACLE_FEED0 is either an AggregatorV3 feed or the MM's AaveOracle; which one
+// is settled here, once, and anything that is neither fails startup.
+export async function resolveFeed0(
+  address: string,
+  sideToken: string,
+  provider: ethers.providers.Provider,
+): Promise<ethers.Contract | MmFeed> {
+  const mmOracle = new ethers.Contract(address, AAVE_ORACLE_ABI, provider);
+  const baseUnit: ethers.BigNumber | undefined = await mmOracle.BASE_CURRENCY_UNIT().catch(() => undefined);
+  if (!baseUnit) {
+    const feed = new ethers.Contract(address, AGGREGATOR_V3_ABI, provider);
+    await feed.latestRoundData().catch((e: any) => {
+      throw new Error(`ORACLE_FEED0 ${address} is neither an AggregatorV3 feed nor an AaveOracle (${e?.reason ?? e?.message ?? e})`);
+    });
+    return feed;
+  }
+  const asset: string = await new ethers.Contract(sideToken, ATOKEN_ABI, provider)
+    .UNDERLYING_ASSET_ADDRESS()
+    .catch(() => {
+      throw new Error(`ORACLE_FEED0 is an AaveOracle but pool token ${sideToken} is not an aToken`);
+    });
+  if ((await mmOracle.getSourceOfAsset(asset)) === ethers.constants.AddressZero) {
+    throw new Error(`AaveOracle ${address} has no source for ${asset}`);
+  }
+  return { kind: 'mm', oracle: mmOracle, asset, baseUnit, at: (a) => new ethers.Contract(a, MM_SOURCE_ABI, provider) };
 }
 
 export async function createVaultContext(
@@ -137,7 +165,7 @@ export async function createVaultContext(
   // token0/USD is the pool price directly.
   const oracle = cfg.ORACLE_ENABLED
     ? {
-        feed0: new ethers.Contract(cfg.ORACLE_FEED0!, AGGREGATOR_V3_ABI, provider),
+        feed0: await resolveFeed0(cfg.ORACLE_FEED0!, cfg.ORACLE_FEED0_SIDE === 'token0' ? token0 : token1, provider),
         feed1: cfg.ORACLE_FEED1
           ? new ethers.Contract(cfg.ORACLE_FEED1, AGGREGATOR_V3_ABI, provider)
           : undefined,
