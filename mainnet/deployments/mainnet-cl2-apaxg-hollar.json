@@ -1,0 +1,45 @@
+{
+  "network": {
+    "name": "mainnet",
+    "chainId": "222222",
+    "evmRpc": "https://hdx.tarn.hydration.cloud",
+    "substrateWs": "wss://hdx.tarn.hydration.cloud"
+  },
+  "deployer": "0x71FeB8b2849101a6E62e3369eaAfDc6154CD0Bc0",
+  "governance": "0xAa7e0000000000000000000000000000000Aa7e0",
+  "keeper": "0x0B0bE14C1158Ba09B720812e70F819366614Cb96",
+  "feeRecipient": "0x6d6f646c70792f74727372790000000000000000",
+  "pool": "apaxg-hollar",
+  "stack": "cl2",
+  "uniswap": {
+    "v3Factory": "0x776c4Fd6A6170165a91bA45Dec40a14bcc8eC354",
+    "pool": "0x419f96a1a34c422FA581E89C317C1B55563009b4",
+    "fee": 3000,
+    "token0": "0x00F283C7a97ecb60dd905CDaB52FEbCeEc04dC0f",
+    "token1": "0x531a654d1696ED52e7275A8cede955E82620f99a",
+    "tokenA": "0x00F283C7a97ecb60dd905CDaB52FEbCeEc04dC0f"
+  },
+  "gamma": {
+    "hypervisorFactory": "0x3e597A84A9eDaCb025B36A5B6E8a6b575cE8C5fA",
+    "hypervisor": "0x2D608c585d19866871AeEb22589B5c4867f2C2ad",
+    "clearing": "0x0AC8eD68C66B93a577EfDaC5aF596D8d5eeA9688",
+    "uniProxy": "0xA8E8bA5811397e739f3FC81A29228C03416E2c0E",
+    "admin": "0xdA75A8Cb7651516Ac459f629d181F614a62172Ad",
+    "rebalanceProxy": "0xbd1d6B85a62BFA41f9665626a61eA986CaFF19e8"
+  },
+  "config": {
+    "twapInterval": 3600,
+    "priceThreshold": 10100,
+    "depositDelta": "10010",
+    "maxTotalSupply": "150000000000000000000000",
+    "deposit0Max": "11948335000000000000",
+    "deposit1Max": "50000000000000000000000",
+    "hypervisorFee": 255,
+    "maxTranslation": 300,
+    "maxWidth": 300,
+    "minInterval": 21600,
+    "baseHalfWidthMult": 5,
+    "limitWidthMult": 5,
+    "posture": "configured"
+  }
+}
