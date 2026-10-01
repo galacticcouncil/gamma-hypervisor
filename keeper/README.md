@@ -241,8 +241,9 @@ meaning and becomes the default *for every vault*. On top of that:
 a leftover inline `VAULTS_JSON` must not quietly beat it. **With neither set the
 keeper synthesises a one-element list from `VAULT`**, so an existing single-vault
 deployment runs unchanged. Once a list is set, the flat `VAULT` is no longer a
-vault of its own: to keep aDOT/HOLLAR in the same process, list
-`vaults/mainnet/adot-hollar.json` first.
+vault of its own: to keep aDOT/HOLLAR in the same process, list it first.
+On mainnet the list is `deploy/vaults.mainnet.json`, mounted as a swarm config
+at `/run/vaults.json` — never baked into the image.
 
 Each array element is a *partial*: it is merged over the defaults and then validated
 with the same refinements, **per vault**. A key set to JSON `null` drops the

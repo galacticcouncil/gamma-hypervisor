@@ -38,6 +38,6 @@ Next:
   2. ENV_FILE=<shared> npm run transfer-ownership -- --check
   3. ENV_FILE=<shared> npm run transfer-ownership        (the single last step)
   4. Per pool: ENV_FILE=<shared> POOL_FILE=<pool> npm run verify
-  5. Keeper: VAULTS_FILE=vaults/mainnet/adot-hollar.json,vaults/<net>-<STACK>/<pool>.json,...
-     (a list replaces the flat VAULT, so pool 1 must be listed to stay kept)
+  5. Keeper: add keeper/vaults/<net>-<STACK>/<pool>.json to keeper/deploy/vaults.mainnet.json
+     (pool 1 first; a list replaces the flat VAULT) and ship it as a new swarm config version
 MSG

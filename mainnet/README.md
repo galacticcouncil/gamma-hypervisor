@@ -309,9 +309,9 @@ ENV_FILE=.env.pools POOL_FILE=pools/atbtc-hollar.env SEEDER_PK=0x… npm run see
   POOL_FILE=pools/<pool>.env node 11-anchor-price.js`. That anchor env holds only
   the key, RPC and gas settings.
 - `02-deploy.js` writes each pool's keeper file to
-  `keeper/vaults/<net>-<STACK>/<pool>.json`. Commit them, rebuild the keeper
-  image, and list them after `vaults/mainnet/adot-hollar.json` in `VAULTS_FILE`,
-  after the ownership transfer: the keeper rebalances through Admin.
+  `keeper/vaults/<net>-<STACK>/<pool>.json`. Commit them, add them to
+  `keeper/deploy/vaults.mainnet.json` after pool 1, and ship that as a new swarm
+  config version, after the ownership transfer: the keeper rebalances through Admin.
 - The vault files do not set `ORACLE_MAX_DEV_TICKS`, so the new vaults take
   whatever the running keeper stack has (runbook §3, §5.13). Read it from the
   keeper's startup banner (`oracle … (maxDev N, maxAge Ns)`) and decide it is

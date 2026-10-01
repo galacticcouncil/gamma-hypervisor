@@ -1,7 +1,12 @@
 # Gamma keeper — Hydration MAINNET. Deploy as Swarmpit stack "gamma".
 #
 # One process, one signer, every vault in VAULTS_FILE. Image: keeper/ at the
-# commit in the tag, vault files baked in (keeper/vaults):
+# commit in the tag. The vault list is NOT in the image: it is the swarm config
+# gamma_vaults_vN, created from keeper/deploy/vaults.mainnet.json (configs are
+# immutable — bump N and repoint on every change):
+#
+#   docker config create gamma_vaults_v1 keeper/deploy/vaults.mainnet.json
+#
 #
 #   cd gamma-hypervisor/keeper
 #   docker build -t galacticcouncil/gamma-keeper:72f13b1 .
@@ -33,10 +38,10 @@ services:
       INDEXER_TIMEOUT_MS: '5000'
       MM_DATA_PROVIDER: '0xdf18300261edfF47b28c6a6adBCBCf468B52e5a5'
 
-      # --- vaults: one file per pool, read in order; a list replaces VAULT ---
-      # pools 2-5 append ,vaults/mainnet-cl2/<pool>.json once their ownership
-      # has moved (the keeper rebalances through Admin)
-      VAULTS_FILE: vaults/mainnet/adot-hollar.json
+      # --- vaults: the mounted list, read in order; a list replaces VAULT ---
+      # pools 2-5 join it once their ownership has moved (the keeper
+      # rebalances through Admin)
+      VAULTS_FILE: /run/vaults.json
 
       # --- per-vault defaults = pool 1 (aDOT/HOLLAR) as it runs live ---
       # every vault file inherits these unless it overrides them. the cl2 files
@@ -79,6 +84,9 @@ services:
       INDEXER_QUOTE_ASSET: '10'
       COMPOUND_ENABLED: 'true'
       COMPOUND_INTERVAL_SECS: '3600'
+    configs:
+      - source: gamma_vaults_v1
+        target: /run/vaults.json
     networks:
       - default
     logging:
@@ -171,3 +179,6 @@ services:
 networks:
   default:
     driver: overlay
+configs:
+  gamma_vaults_v1:
+    external: true
