@@ -5,7 +5,7 @@
 # gamma_vaults_vN, created from keeper/deploy/vaults.mainnet.json (configs are
 # immutable — bump N and repoint on every change):
 #
-#   docker config create gamma_vaults_v1 keeper/deploy/vaults.mainnet.json
+#   docker config create gamma_vaults_v2 keeper/deploy/vaults.mainnet.json
 #
 #
 #   cd gamma-hypervisor/keeper
@@ -43,7 +43,7 @@ services:
       # a vault key left in this env would become a default for every pool
       VAULTS_FILE: /run/vaults.json
     configs:
-      - source: gamma_vaults_v1
+      - source: gamma_vaults_v2
         target: /run/vaults.json
     networks:
       - default
@@ -74,43 +74,24 @@ services:
           cpus: '0.5'
           memory: 256M
   monitor:
-    image: galacticcouncil/gamma-monitor:0.3.0
+    # every pool in the shared descriptor (VAULTS_FILE), same file the keeper
+    # mounts. per-pool thresholds come from it: clearing/grace/divergence from
+    # MONITOR_*, the rest from the keeper's own keys, so alerts fire on the
+    # keeper's real gates.
+    image: galacticcouncil/gamma-monitor:<tag>
     environment:
       RPC_URL: https://hdx.tarn.hydration.cloud
       KEEPER: '0x0B0bE14C1158Ba09B720812e70F819366614Cb96'
-      VAULT: '0xa206D0959813f17c17C87147271C49065438648A'
-      POOL: '0x5C6208A3c316A801f8996750aA7b6f45Fc988548'
-      CLEARING: '0x3541A3E5Db2d611904BE4F45A3CAFEA9A4df3e48'
-      PRICE_FEED: '0xFBCa0A6dC5B74C042DF23025D99ef0F1fcAC6702'
-      # Leave unset to log only; set it to actually alert.
+      # placeholder: the live webhook is set out of band, never committed
       DISCORD_WEBHOOK: ''
       CHECK_INTERVAL_SECS: '300'
       REALERT_SECS: '21600'
-      # Warn ABOVE the keeper's own floor, so there is time to act before it
-      # stops. Measured costs: compound 643k gas ~0.0000039 WETH, rebalance
-      # 815k ~0.0000049 — so 0.002 is weeks of runway, not hours.
       GAS_WARN_WEI: '2000000000000000'
       GAS_FLOOR_WEI: '1000000000000000'
-      REBALANCE_PROXY: '0x8B7Dd119b7edb85D9cF166129DBec5D88DC78C94'
-      # Liveness is "work that was DUE and did not happen", never "no recent
-      # transactions" — a healthy keeper is silent for days. These must match
-      # the keeper's own values or the check disagrees with what it is watching.
-      REBALANCE_THRESHOLD_MULT: '11'
-      MIN_INTERVAL_SECS: '21600'
-      REBALANCE_GRACE_SECS: '7200'
-      # Above this pool-vs-oracle gap the keeper is RIGHT to hold, so the
-      # overdue check stands down rather than blaming it.
-      ORACLE_MAX_DEV_TICKS: '50'
-      # The keeper clamps the pool TWAP against the oracle, not spot — the
-      # watchdog must build the same number or it disagrees with what it
-      # watches. Mirror the keeper's values exactly.
-      TWAP_WINDOW_SECS: '3600'
-      MIN_TWAP_WINDOW_SECS: '3000'
-      # Mirrors the keeper's LIMIT_REFRESH_TICKS: catches a one-sided limit
-      # parked out of range while the base sits inside its drift threshold.
-      LIMIT_REFRESH_TICKS: '120'
-      DIVERGENCE_BPS: '200'
-      STALE_SECONDS: '28800'
+      VAULTS_FILE: /run/vaults.json
+    configs:
+      - source: gamma_vaults_v2
+        target: /run/vaults.json
     networks:
       - default
     logging:
@@ -138,5 +119,5 @@ networks:
   default:
     driver: overlay
 configs:
-  gamma_vaults_v1:
+  gamma_vaults_v2:
     external: true

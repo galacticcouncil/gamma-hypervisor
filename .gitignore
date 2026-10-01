@@ -11,9 +11,11 @@ node_modules
 !/zombienet/**
 !/keeper/**
 !/monitor/**
+!/ui/**
 !/lark/**
 !/mainnet/**
 !/.gitignore
+!/.dockerignore
 !/.env.example
 !/hardhat.config.ts
 !/LICENSE

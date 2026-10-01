@@ -10,6 +10,7 @@ import {
   resolveDwellSecs,
   selectVault,
 } from '../src/config';
+import { disambiguateTags, type VaultCtx } from '../src/chain';
 import { stepDwell } from '../src/keeper';
 import { blankState } from '../src/state';
 
@@ -124,6 +125,78 @@ describe('per-vault overrides', () => {
     process.env.VAULTS_FILE = file;
     const { vaults } = loadKeeperConfig();
     expect(vaults.map((v) => v.VAULT)).toEqual([C]);
+  });
+});
+
+describe('LABEL is the log tag and the ui row label', () => {
+  it('is per vault, and inheritable like any other override', () => {
+    process.env.VAULTS_JSON = JSON.stringify([
+      { VAULT: A, LABEL: 'aDOT/HOLLAR' },
+      { VAULT: B },
+    ]);
+    const { vaults } = loadKeeperConfig();
+    expect(vaults[0].LABEL).toBe('aDOT/HOLLAR');
+    // unset means "derive SYM0/SYM1 from the token symbols" — see createVaultContext
+    expect(vaults[1].LABEL).toBeUndefined();
+  });
+
+  it('is bounded, so one vault cannot shove the per-block log sideways', () => {
+    process.env.VAULTS_JSON = JSON.stringify([{ VAULT: A, LABEL: 'x'.repeat(25) }]);
+    expect(() => loadKeeperConfig()).toThrow(/LABEL/);
+  });
+
+  it('becomes the tag, disambiguated only when two vaults collide', () => {
+    const mk = (tag: string, address: string) => ({ tag, vault: { address } }) as unknown as VaultCtx;
+    const a = mk('aDOT/HOLLAR', A);
+    const b = mk('tBTC/HOLLAR', B);
+    disambiguateTags([a, b]);
+    expect([a.tag, b.tag]).toEqual(['aDOT/HOLLAR', 'tBTC/HOLLAR']);
+
+    const c = mk('aDOT/HOLLAR', A);
+    const d = mk('aDOT/HOLLAR', B);
+    disambiguateTags([c, d]);
+    expect(c.tag).toBe(`aDOT/HOLLAR@${A.slice(2, 8)}`);
+    expect(d.tag).toBe(`aDOT/HOLLAR@${B.slice(2, 8)}`);
+  });
+});
+
+describe('vaults.json is shared with the monitor and the ui', () => {
+  it('skips the MONITOR_ and UI_ sibling keys instead of rejecting them', () => {
+    process.env.VAULTS_JSON = JSON.stringify([
+      {
+        VAULT: A,
+        LABEL: 'aDOT/HOLLAR',
+        MONITOR_CLEARING: C,
+        MONITOR_GRACE_SECS: 21600,
+        MONITOR_DIVERGENCE_BPS: 50,
+        UI_START_BLOCK: 14_000_000,
+        _note: 'json has no comments, so the shared file carries one here',
+      },
+    ]);
+    const { vaults } = loadKeeperConfig();
+    expect(vaults).toHaveLength(1);
+    expect(vaults[0].LABEL).toBe('aDOT/HOLLAR');
+    // ...and they are not smuggled into the keeper's own config
+    for (const k of ['MONITOR_CLEARING', 'MONITOR_GRACE_SECS', 'UI_START_BLOCK', '_note'])
+      expect(vaults[0] as unknown as Record<string, unknown>).not.toHaveProperty(k);
+  });
+
+  it('loads the committed descriptors the three services share', () => {
+    // the globals the stack supplies alongside the descriptor; REGIME_ENABLED needs them
+    process.env.MM_DATA_PROVIDER = '0x' + 'df'.repeat(20);
+    for (const f of ['vaults.mainnet.json', 'vaults.lark4.json']) {
+      process.env.VAULTS_FILE = join(import.meta.dirname, '../deploy', f);
+      const { vaults } = loadKeeperConfig();
+      expect(vaults.length).toBeGreaterThan(0);
+      for (const v of vaults) expect(v.VAULT).toMatch(/^0x[0-9a-fA-F]{40}$/);
+    }
+  });
+
+  it('still rejects a typo that only looks like a sibling key', () => {
+    process.env.VAULTS_JSON = JSON.stringify([{ VAULT: A, MONITORING_CLEARING: C }]);
+    expect(() => loadKeeperConfig()).toThrow(/not a known keeper setting/);
+    process.env.VAULTS_JSON = JSON.stringify([{ VAULT: A, UID_START_BLOCK: 1 }]);
+    expect(() => loadKeeperConfig()).toThrow(/not a known keeper setting/);
   });
 });
 

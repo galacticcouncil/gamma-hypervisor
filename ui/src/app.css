@@ -1,0 +1,729 @@
+/* vendored tuicss — the CDN import also meant no internet = no styling */
+@import url('/tuicss/tuicss.min.css');
+
+/* the 16-colour VGA text palette. dims are the 0xA8 family tuicss already
+   uses, brights are the same 6-bit DAC values ×4 (0x54 / 0xFC). every theme
+   below is built from these (the phosphor themes borrow their monitor's
+   actual phosphor shades — those monitors predate the VGA DAC). */
+:root {
+  --dos-black: #000000;
+  --dos-blue: #0000a8;
+  --dos-green: #00a800;
+  --dos-cyan: #00a8a8;
+  --dos-red: #a80000;
+  --dos-magenta: #a800a8;
+  --dos-brown: #a85400;
+  --dos-gray: #a8a8a8;
+  --dos-dark-gray: #545454;
+  --dos-b-blue: #5454fc;
+  --dos-b-green: #54fc54;
+  --dos-b-cyan: #54fcfc;
+  --dos-b-red: #fc5454;
+  --dos-b-magenta: #fc54fc;
+  --dos-yellow: #fcfc54;
+  --dos-white: #fcfcfc;
+}
+
+/* ── semantic tokens, default = Borland blue (Turbo Vision) ──────────── */
+:root,
+[data-theme='borland'] {
+  /* the ▒-dithered desktop */
+  --desktop-a: var(--dos-blue);
+  --desktop-b: var(--dos-black);
+
+  /* menu bar + status bar */
+  --bar-bg: var(--dos-gray);
+  --bar-text: var(--dos-black);
+  --bar-hot: var(--dos-red);
+  --bar-muted: var(--dos-dark-gray);
+  --bar-ok: var(--dos-green);
+  --bar-warn: var(--dos-brown);
+  --bar-stale: var(--dos-magenta);
+  --bar-down: var(--dos-red);
+
+  /* panels and windows */
+  --panel-bg: var(--dos-blue);
+  --panel-text: var(--dos-white);
+  --muted: var(--dos-gray);
+  --bright: var(--dos-white);
+  --frame: var(--dos-gray);
+  --head-text: var(--dos-yellow);
+
+  /* pop-up windows are dialogs, and DOS dialogs contrast with the surface:
+     Turbo Vision and NC dialogs are gray with black text */
+  --window-bg: var(--dos-gray);
+  --window-text: var(--dos-black);
+  --window-muted: var(--dos-dark-gray);
+  --window-bright: var(--dos-black);
+  --window-frame: var(--dos-black);
+  --w-ok: var(--dos-green);
+  --w-warn: var(--dos-brown);
+  --w-err: var(--dos-red);
+  --w-stale: var(--dos-magenta);
+  --w-unknown: var(--dos-dark-gray);
+  --chart-ok: var(--dos-b-green);
+  --chart-err: var(--dos-b-red);
+
+  /* the NC cursor bar and panel title */
+  --cursor-bg: var(--dos-cyan);
+  --cursor-text: var(--dos-black);
+  --title-bg: var(--dos-cyan);
+  --title-text: var(--dos-black);
+
+  /* menu selection (TV attribute 0x20) and the •-marked current item */
+  --select-bg: var(--dos-green);
+  --select-text: var(--dos-black);
+  --active-bg: var(--dos-blue);
+  --active-text: var(--dos-white);
+
+  /* EDIT-style dialogs */
+  --dialog-bg: var(--dos-gray);
+  --dialog-text: var(--dos-black);
+  --dialog-frame: var(--dos-black);
+  --dialog-hot: var(--dos-red);
+
+  --chart-bg: var(--dos-black);
+
+  /* status verdicts */
+  --success-color: var(--dos-b-green);
+  --warning-color: var(--dos-yellow);
+  --error-color: var(--dos-b-red);
+  --timeout-color: var(--dos-b-red);
+  --stale-color: var(--dos-b-magenta);
+  --unknown-color: var(--dos-dark-gray);
+
+  /* keeper verdicts: armed and held-legit wait in yellow, a fault is red, a tx
+     in flight is cyan, off/unknown is dark gray; DRY is an inverse-video badge */
+  --armed: var(--dos-yellow);
+  --held: var(--dos-yellow);
+  --fault: var(--dos-b-red);
+  --acting: var(--dos-b-cyan);
+  --off: var(--dos-dark-gray);
+  --dry: var(--dos-yellow);
+}
+
+/* ── PC Tools: black text on cyan panels, blue accents ───────────────── */
+[data-theme='ocean'] {
+  --desktop-a: var(--dos-cyan);
+  --desktop-b: var(--dos-blue);
+  --panel-bg: var(--dos-cyan);
+  --panel-text: var(--dos-black);
+  --muted: var(--dos-blue);
+  --bright: var(--dos-white);
+  --frame: var(--dos-black);
+  --window-frame: var(--dos-black);
+  --head-text: var(--dos-blue);
+  --cursor-bg: var(--dos-blue);
+  --cursor-text: var(--dos-white);
+  --title-bg: var(--dos-blue);
+  --title-text: var(--dos-white);
+  --window-bg: var(--dos-white);
+  --chart-bg: var(--dos-black);
+  /* ok is green in every theme; bright green reads on cyan, dim green sinks */
+  --success-color: var(--dos-b-green);
+  --warning-color: var(--dos-brown);
+  --error-color: var(--dos-red);
+  --timeout-color: var(--dos-red);
+  --stale-color: var(--dos-magenta);
+  --unknown-color: var(--dos-dark-gray);
+
+  /* keeper verdicts, dimmed for the cyan panel like the verdicts above */
+  --armed: var(--dos-brown);
+  --held: var(--dos-brown);
+  --fault: var(--dos-red);
+  --acting: var(--dos-blue);
+  --off: var(--dos-dark-gray);
+  --dry: var(--dos-yellow);
+}
+
+/* ── green phosphor: a monochrome P1 terminal ────────────────────────── */
+[data-theme='phosphor'] {
+  --desktop-a: #002400;
+  --desktop-b: var(--dos-black);
+  --bar-bg: var(--dos-green);
+  --bar-text: var(--dos-black);
+  --bar-hot: var(--dos-black);
+  --bar-muted: #005400;
+  --bar-ok: var(--dos-b-green);
+  --bar-warn: var(--dos-black);
+  --bar-stale: var(--dos-black);
+  --bar-down: var(--dos-black);
+  --panel-bg: var(--dos-black);
+  --panel-text: var(--dos-green);
+  --muted: #007800;
+  --bright: var(--dos-b-green);
+  --frame: var(--dos-green);
+  --window-frame: var(--dos-b-green);
+  --head-text: var(--dos-b-green);
+  --cursor-bg: var(--dos-green);
+  --cursor-text: var(--dos-black);
+  --title-bg: var(--dos-green);
+  --title-text: var(--dos-black);
+  --select-bg: var(--dos-b-green);
+  --select-text: var(--dos-black);
+  --active-bg: var(--dos-black);
+  --active-text: var(--dos-b-green);
+  --dialog-bg: var(--dos-black);
+  --dialog-text: var(--dos-green);
+  --dialog-frame: var(--dos-green);
+  --dialog-hot: var(--dos-b-green);
+  --window-bg: var(--dos-green);
+  --window-muted: #003800;
+  --w-ok: var(--dos-b-green);
+  --w-warn: var(--dos-black);
+  --w-err: var(--dos-white);
+  --w-stale: var(--dos-white);
+  --w-unknown: #005400;
+  --chart-bg: var(--dos-black);
+
+  /* keeper verdicts on one phosphor: attention is the bright intensity; a
+     fault stays red, like .s-error does on this panel */
+  --armed: var(--dos-b-green);
+  --held: var(--dos-b-green);
+  --fault: var(--dos-b-red);
+  --acting: var(--dos-b-green);
+  --off: #005400;
+  --dry: var(--dos-b-green);
+}
+
+/* ── amber phosphor: a monochrome P3 terminal ────────────────────────── */
+[data-theme='amber'] {
+  --desktop-a: #2a1c00;
+  --desktop-b: var(--dos-black);
+  --bar-bg: #a86400;
+  --bar-text: var(--dos-black);
+  --bar-hot: var(--dos-black);
+  --bar-muted: #543200;
+  --bar-ok: var(--dos-b-green);
+  --bar-warn: var(--dos-black);
+  --bar-stale: var(--dos-black);
+  --bar-down: var(--dos-black);
+  --panel-bg: var(--dos-black);
+  --panel-text: #a86400;
+  --muted: #785000;
+  --bright: #fcb000;
+  --frame: #a86400;
+  --window-frame: #fcb000;
+  --head-text: #fcb000;
+  --cursor-bg: #a86400;
+  --cursor-text: var(--dos-black);
+  --title-bg: #a86400;
+  --title-text: var(--dos-black);
+  --select-bg: #fcb000;
+  --select-text: var(--dos-black);
+  --active-bg: var(--dos-black);
+  --active-text: #fcb000;
+  --dialog-bg: var(--dos-black);
+  --dialog-text: #a86400;
+  --dialog-frame: #a86400;
+  --dialog-hot: #fcb000;
+  --window-bg: #a86400;
+  --window-muted: #543200;
+  --w-ok: var(--dos-b-green);
+  --w-warn: var(--dos-black);
+  --w-err: var(--dos-white);
+  --w-stale: var(--dos-white);
+  --w-unknown: #543200;
+  --chart-bg: var(--dos-black);
+
+  /* keeper verdicts, as on the green phosphor */
+  --armed: #fcb000;
+  --held: #fcb000;
+  --fault: var(--dos-b-red);
+  --acting: #fcb000;
+  --off: #543200;
+  --dry: #fcb000;
+}
+
+/* ── paper: the light theme, DOS dialog gray on white ────────────────── */
+[data-theme='paper'] {
+  --desktop-a: var(--dos-gray);
+  --desktop-b: var(--dos-white);
+  --panel-bg: var(--dos-white);
+  --panel-text: var(--dos-black);
+  --muted: var(--dos-dark-gray);
+  --bright: var(--dos-black);
+  --frame: var(--dos-dark-gray);
+  --window-frame: var(--dos-black);
+  --head-text: var(--dos-blue);
+  --cursor-bg: var(--dos-cyan);
+  --cursor-text: var(--dos-black);
+  --title-bg: var(--dos-cyan);
+  --title-text: var(--dos-black);
+  --active-bg: var(--dos-blue);
+  --active-text: var(--dos-white);
+  --chart-bg: var(--dos-white);
+  --chart-ok: var(--dos-green);
+  --chart-err: var(--dos-red);
+  /* dim verdict colours — the brights vanish on white */
+  --success-color: var(--dos-green);
+  --warning-color: var(--dos-brown);
+  --error-color: var(--dos-red);
+  --timeout-color: var(--dos-red);
+  --stale-color: var(--dos-magenta);
+  --unknown-color: var(--dos-dark-gray);
+
+  /* keeper verdicts, dimmed too */
+  --armed: var(--dos-brown);
+  --held: var(--dos-brown);
+  --fault: var(--dos-red);
+  --acting: var(--dos-blue);
+  --off: var(--dos-dark-gray);
+  --dry: var(--dos-yellow);
+}
+
+/* ── Norton Commander: bright-cyan text on blue, cyan F-key bar ──────── */
+[data-theme='nc'] {
+  --bar-bg: var(--dos-cyan);
+  --bar-text: var(--dos-black);
+  --bar-muted: var(--dos-blue);
+  --panel-bg: var(--dos-blue);
+  --panel-text: var(--dos-b-cyan);
+  --muted: var(--dos-cyan);
+  --bright: var(--dos-white);
+  --frame: var(--dos-cyan);
+  --head-text: var(--dos-yellow);
+  --cursor-bg: var(--dos-cyan);
+  --cursor-text: var(--dos-black);
+  --title-bg: var(--dos-cyan);
+  --title-text: var(--dos-black);
+
+  /* keeper verdicts; the panel text is already bright cyan, so acting is white */
+  --armed: var(--dos-yellow);
+  --held: var(--dos-yellow);
+  --fault: var(--dos-b-red);
+  --acting: var(--dos-white);
+  --off: var(--dos-dark-gray);
+  --dry: var(--dos-yellow);
+}
+
+/* ── CGA: mode-4 palette — black, cyan, magenta, white ───────────────── */
+[data-theme='cga'] {
+  --desktop-a: var(--dos-magenta);
+  --desktop-b: var(--dos-black);
+  --bar-bg: var(--dos-b-cyan);
+  --bar-text: var(--dos-black);
+  --bar-hot: var(--dos-magenta);
+  --bar-muted: var(--dos-dark-gray);
+  --panel-bg: var(--dos-black);
+  --panel-text: var(--dos-b-cyan);
+  --muted: var(--dos-cyan);
+  --bright: var(--dos-white);
+  --frame: var(--dos-b-magenta);
+  --head-text: var(--dos-b-magenta);
+  --cursor-bg: var(--dos-b-magenta);
+  --cursor-text: var(--dos-black);
+  --title-bg: var(--dos-b-magenta);
+  --title-text: var(--dos-black);
+  --select-bg: var(--dos-b-magenta);
+  --select-text: var(--dos-black);
+  --active-bg: var(--dos-black);
+  --active-text: var(--dos-b-magenta);
+  --dialog-bg: var(--dos-black);
+  --dialog-text: var(--dos-b-cyan);
+  --dialog-frame: var(--dos-b-magenta);
+  --dialog-hot: var(--dos-b-magenta);
+  --window-bg: var(--dos-white);
+  --window-frame: var(--dos-b-magenta);
+  --chart-bg: var(--dos-black);
+  --chart-err: var(--dos-b-magenta);
+
+  /* keeper verdicts in four colours: attention white, fault magenta */
+  --armed: var(--dos-white);
+  --held: var(--dos-white);
+  --fault: var(--dos-b-magenta);
+  --acting: var(--dos-white);
+  --off: var(--dos-dark-gray);
+  --dry: var(--dos-b-magenta);
+}
+
+/* ── white phosphor: a monochrome P4 terminal ────────────────────────── */
+[data-theme='mono'] {
+  --desktop-a: #2a2a2a;
+  --desktop-b: var(--dos-black);
+  --bar-bg: var(--dos-gray);
+  --bar-text: var(--dos-black);
+  --bar-hot: var(--dos-black);
+  --panel-bg: var(--dos-black);
+  --panel-text: var(--dos-gray);
+  --muted: var(--dos-dark-gray);
+  --bright: var(--dos-white);
+  --frame: var(--dos-gray);
+  --head-text: var(--dos-white);
+  --cursor-bg: var(--dos-gray);
+  --cursor-text: var(--dos-black);
+  --title-bg: var(--dos-gray);
+  --title-text: var(--dos-black);
+  --select-bg: var(--dos-white);
+  --select-text: var(--dos-black);
+  --active-bg: var(--dos-black);
+  --active-text: var(--dos-white);
+  --dialog-bg: var(--dos-black);
+  --dialog-text: var(--dos-gray);
+  --dialog-frame: var(--dos-gray);
+  --dialog-hot: var(--dos-white);
+  --chart-bg: var(--dos-black);
+
+  /* keeper verdicts on white phosphor: attention white, fault red as .s-error */
+  --armed: var(--dos-white);
+  --held: var(--dos-white);
+  --fault: var(--dos-b-red);
+  --acting: var(--dos-white);
+  --off: var(--dos-dark-gray);
+  --dry: var(--dos-white);
+}
+
+html {
+  background-color: var(--desktop-b);
+  /* tuicss sets 18px Lucida Console; the DOS font is drawn on a 9×16 cell
+     and is pixel-perfect at 16px */
+  font-size: 16px;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  /* the ▒-dithered desktop, as a 2px checker — themeable, unlike a png */
+  background-color: var(--desktop-b);
+  background-image: conic-gradient(
+    var(--desktop-a) 25%,
+    transparent 0 50%,
+    var(--desktop-a) 0 75%,
+    transparent 0
+  );
+  background-size: 4px 4px;
+  color: var(--muted);
+  /* tuicss declares the VGA font under the family name "DOS" — asking for
+     'Perfect DOS VGA' silently fell through to the browser's monospace */
+  font-family: 'DOS', 'Perfect DOS VGA 437 Win', monospace;
+  -webkit-font-smoothing: none;
+  text-rendering: optimizeSpeed;
+}
+
+/* text mode has no rounded corners and no easing */
+*,
+*::before,
+*::after {
+  border-radius: 0 !important;
+  transition: none !important;
+}
+
+/* hardware cursor blink: instant on/off, ~1.06s period like the real thing */
+@keyframes dos-blink {
+  0%,
+  49% {
+    opacity: 1;
+  }
+  50%,
+  100% {
+    opacity: 0;
+  }
+}
+
+.blink {
+  animation: dos-blink 1.06s step-end infinite;
+}
+
+/* DOS window shadows are the text underneath dimmed, not solid black */
+.tui-panel,
+.tui-window,
+.tui-dropdown-content {
+  box-shadow: 10px 8px 0 rgba(0, 0, 0, 0.55) !important;
+}
+
+/* panels follow the theme, not tuicss's hardcoded blue */
+.tui-panel {
+  background-color: var(--panel-bg);
+  color: var(--panel-text);
+}
+
+/* pop-up windows use the dialog colours and remap the generic tokens, so
+   everything inside them re-tunes itself to the dialog surface */
+.tui-window {
+  background-color: var(--window-bg);
+  color: var(--window-text);
+  --muted: var(--window-muted);
+  --bright: var(--window-bright);
+  --frame: var(--window-muted);
+}
+
+.tui-window .s-success {
+  color: var(--w-ok);
+}
+.tui-window .s-warning {
+  color: var(--w-warn);
+}
+.tui-window .s-error,
+.tui-window .s-timeout {
+  color: var(--w-err);
+}
+.tui-window .s-stale {
+  color: var(--w-stale);
+}
+.tui-window .s-unknown {
+  color: var(--w-unknown);
+}
+
+/* the chart bed keeps its own high-contrast bars whatever the dialog colour */
+.tui-window .tchart .s-success {
+  color: var(--chart-ok);
+}
+.tui-window .tchart .s-error {
+  color: var(--chart-err);
+}
+
+.tui-fieldset {
+  border-color: var(--window-frame);
+}
+
+.tui-fieldset-button {
+  color: var(--window-text);
+}
+
+/* menu bar and status bar */
+.tui-nav,
+.tui-statusbar,
+.tui-dropdown-content {
+  background-color: var(--bar-bg);
+  color: var(--bar-text);
+}
+
+.tui-nav ul li:hover {
+  background-color: var(--select-bg);
+  color: var(--select-text);
+}
+
+/* Turbo Vision paints menu/statusbar hotkeys red */
+.hot {
+  color: var(--bar-hot);
+}
+
+.tui-statusbar .key {
+  color: var(--bar-hot);
+}
+
+/* text selection looks like a DOS marking block */
+::selection {
+  background: var(--cursor-bg);
+  color: var(--cursor-text);
+}
+
+/* DOS scrollbars: dithered track, solid thumb */
+::-webkit-scrollbar {
+  width: 16px;
+  height: 16px;
+}
+
+::-webkit-scrollbar-track {
+  background-color: var(--chart-bg);
+  background-image: conic-gradient(
+    var(--frame) 25%,
+    transparent 0 50%,
+    var(--frame) 0 75%,
+    transparent 0
+  );
+  background-size: 4px 4px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--frame);
+  border: 2px solid var(--chart-bg);
+}
+
+::-webkit-scrollbar-corner {
+  background: var(--chart-bg);
+}
+
+* {
+  scrollbar-color: var(--frame) var(--bar-muted);
+}
+
+/* Status text colours. these are s- prefixed because tuicss already owns
+   .success / .warning / .error as *background* utilities — the plain names
+   painted solid green blocks over the lag and health cells. */
+.s-success {
+  color: var(--success-color);
+}
+.s-warning {
+  color: var(--warning-color);
+}
+.s-error {
+  color: var(--error-color);
+}
+.s-timeout {
+  color: var(--timeout-color);
+}
+.s-stale {
+  color: var(--stale-color);
+}
+.s-unknown {
+  color: var(--unknown-color);
+}
+
+/* keeper verdict classes, same s- prefix; the tokens are set per scheme above */
+.s-armed {
+  color: var(--armed);
+}
+.s-held {
+  color: var(--held);
+}
+.s-fault {
+  color: var(--fault);
+}
+.s-acting {
+  color: var(--acting);
+}
+.s-off {
+  color: var(--off);
+}
+
+/* the DRY badge: inverse video, never blinking — a dry-run keeper looks
+   healthy and does nothing */
+.dry {
+  background-color: var(--dry);
+  color: var(--dos-black);
+  padding: 0 4px;
+}
+
+/* on the bars the panel-tuned variants are unreadable */
+.tui-statusbar .s-success {
+  color: var(--bar-ok);
+}
+.tui-statusbar .s-warning {
+  color: var(--bar-warn);
+}
+.tui-statusbar .s-stale {
+  color: var(--bar-stale);
+}
+.tui-statusbar .s-error,
+.tui-statusbar .s-timeout {
+  color: var(--bar-down);
+}
+
+/* Menus: tuicss only highlights <a> children, so <span> items had no hover and
+   the "active" selection was never drawn at all. */
+.tui-dropdown-content ul li .tui-menu-item {
+  display: block;
+  padding: 0 4px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.tui-dropdown-content .tui-menu-item:hover,
+.tui-dropdown-content .tui-menu-item:focus-visible,
+.tui-dropdown-content .tui-menu-item:focus {
+  background-color: var(--select-bg);
+  color: var(--select-text);
+  outline: none;
+}
+
+/* the open menu inverts its own menu-bar entry, like Turbo Vision */
+.tui-dropdown.open > .menu-trigger {
+  background-color: var(--select-bg);
+  color: var(--select-text);
+}
+
+.tui-dropdown-content .tui-menu-item.tui-menu-active {
+  background-color: var(--active-bg);
+  color: var(--active-text);
+}
+
+.tui-dropdown-content .tui-menu-item.tui-menu-active::before {
+  content: '\2022 ';
+}
+
+.tui-dropdown-content .tui-menu-item.tui-menu-disabled {
+  color: var(--bar-muted);
+  cursor: not-allowed;
+}
+
+.tui-dropdown-content .tui-menu-item.tui-menu-disabled:hover {
+  background-color: transparent;
+  color: var(--bar-muted);
+}
+
+.tui-menu-note {
+  display: block;
+  padding: 0 4px;
+  color: var(--bar-muted);
+  white-space: nowrap;
+}
+
+/* The table is a Norton Commander panel: plain, no striping (text mode has
+   no subtle shades), and the cursor is a full-width bar. */
+.tui-table {
+  border-color: var(--frame);
+}
+
+.tui-table tbody {
+  background-color: transparent;
+  color: var(--panel-text);
+}
+
+.tui-table tbody tr td {
+  border-color: var(--frame);
+}
+
+.tui-table tbody tr:hover,
+.tui-table tbody tr.cursor {
+  background-color: var(--cursor-bg);
+}
+
+.tui-table tbody tr:hover td,
+.tui-table tbody tr.cursor td {
+  color: var(--cursor-text);
+}
+
+/* the endpoint whose window is open */
+.tui-table tbody tr.selected td:first-child::before {
+  content: '►';
+  color: var(--head-text);
+}
+
+.tui-table tbody tr:hover.selected td:first-child::before,
+.tui-table tbody tr.cursor.selected td:first-child::before {
+  color: var(--cursor-text);
+}
+
+/* the header parks under the fixed nav instead of scrolling away; --nav-h is
+   measured by NavBar */
+.tui-table thead th {
+  position: sticky;
+  top: var(--nav-h, 26px);
+  z-index: 2;
+  background-color: var(--panel-bg);
+  color: var(--head-text);
+  white-space: nowrap;
+}
+
+.tui-table thead th.sortable {
+  cursor: pointer;
+  user-select: none;
+}
+
+.tui-table thead th.sortable:hover {
+  background-color: var(--select-bg);
+  color: var(--select-text);
+}
+
+/* tuicss hardcodes a blue strip behind tabs; the window carries the colour */
+.tui-tabs {
+  background-color: transparent;
+}
+
+.tui-tab {
+  color: var(--muted);
+}
+
+.num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* VGA text mode has exactly one font weight */
+th,
+b,
+strong,
+.tui-panel-header {
+  font-weight: normal;
+}

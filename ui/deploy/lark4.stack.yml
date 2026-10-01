@@ -1,0 +1,91 @@
+# gamma ui — lark4 fork rehearsal. deploy as swarmpit stack "gamma-ui" on lark,
+# beside stack "gamma-keeper" (keeper/deploy/lark4.stack.yml): the ui joins
+# gamma-keeper_default (external) to reach the keeper listener and gateway
+# (external) for traefik. lark has one node, so RPC_URL is the keeper's provider
+# and `chainRpcShared` reads true there by design; there is no second head
+# source and no monitor. lark validates plumbing, liveness and the cutover
+# commands — its oracle is frozen (ORACLE_ENABLED false), economics mean nothing.
+#
+# same image as mainnet (ui/Dockerfile from the repo root, commit-pinned tag,
+# autoredeploy OFF). descriptor, once per change:
+#   docker config create gamma_vaults_v1 keeper/deploy/vaults.lark4.json
+services:
+  ui:
+    image: galacticcouncil/gamma-ui:<sha>
+    environment:
+      RPC_URL: https://node4.lark.hydration.cloud
+      VAULTS_FILE: /run/config/vaults.json
+      # stack-qualified service name on gamma-keeper_default; set once the keeper
+      # runs an image with the status listener and STATUS_PORT=8787
+      KEEPER_URL: http://gamma-keeper_keeper:8787
+      # no monitor on lark: MONITOR_URL stays unset, the column reads `not configured`
+      DB_PATH: /data/gamma.db
+      BACKUP_DIR: /backup
+      PUBLIC_URL: https://gamma.lark.hydration.cloud
+      ORIGIN: https://gamma.lark.hydration.cloud
+    configs:
+      - source: gamma_vaults_v1
+        target: /run/config/vaults.json
+    volumes:
+      - db:/data
+      - backup:/backup
+    networks:
+      - gamma-keeper_default
+      - gateway
+    healthcheck:
+      test: ['CMD-SHELL', 'wget -qO- http://127.0.0.1:3000/healthz || exit 1']
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-file: '5'
+        max-size: 10m
+    deploy:
+      # one sqlite writer — never scale this
+      replicas: 1
+      # both volumes are node-local: a reschedule onto another node starts on an
+      # empty db and leaves every backup behind. pin the service to the node that
+      # holds them before the first deploy.
+      # placement:
+      #   constraints: [node.hostname == <host>]
+      labels:
+        com.hydration.role: gamma-ui
+        traefik.docker.network: gateway
+        # router and service names are global to the traefik instance on gateway:
+        # `gamma-ui`, never `gamma` — the keeper/monitor stack is called gamma
+        traefik.http.routers.gamma-ui.rule: Host(`gamma.lark.hydration.cloud`)
+        traefik.http.routers.gamma-ui.tls: 'true'
+        traefik.http.routers.gamma-ui.tls.certresolver: myresolver
+        traefik.http.services.gamma-ui.loadbalancer.server.port: '3000'
+        # the one label away from gating it, deliberately not enabled (operator: public read-only):
+        # traefik.http.routers.gamma-ui.middlewares: gamma-ui-auth@docker
+        # traefik.http.middlewares.gamma-ui-auth.basicauth.users: <user>:<htpasswd>
+      update_config:
+        parallelism: 1
+        order: stop-first
+        failure_action: rollback
+      restart_policy:
+        condition: any
+        delay: 10s
+      resources:
+        reservations:
+          cpus: '0.05'
+          memory: 64M
+        limits:
+          cpus: '0.5'
+          memory: 512M
+networks:
+  gamma-keeper_default:
+    external: true
+  gateway:
+    external: true
+volumes:
+  db:
+    driver: local
+  backup:
+    driver: local
+configs:
+  gamma_vaults_v1:
+    external: true

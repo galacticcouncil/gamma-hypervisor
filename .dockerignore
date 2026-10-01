@@ -1,0 +1,17 @@
+# context for ui/Dockerfile only (`docker buildx build -f ui/Dockerfile .` from the
+# repo root). keeper/ and monitor/ build with their own directory as the context
+# and never read this file. a whitelist: without it the hardhat tree (1.47 MB
+# lockfile, audit pdfs) and any local keeper/.env transit the builder every build.
+*
+!ui/**
+!keeper/src/**
+!keeper/package.json
+
+# never, even inside the whitelisted dirs
+**/.env*
+**/node_modules
+ui/build
+ui/.svelte-kit
+ui/*.db
+ui/*.db-wal
+ui/*.db-shm
