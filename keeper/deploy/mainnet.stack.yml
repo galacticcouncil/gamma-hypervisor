@@ -9,8 +9,8 @@
 #
 #
 #   cd gamma-hypervisor/keeper
-#   docker build -t galacticcouncil/gamma-keeper:72f13b1 .
-#   docker push galacticcouncil/gamma-keeper:72f13b1
+#   docker build -t galacticcouncil/gamma-keeper:64f8637 .
+#   docker push galacticcouncil/gamma-keeper:64f8637
 #
 # PRIVATE_KEY is inline by choice. Swarmpit renders stack env in its api and
 # ui, and with several vaults on one signer this key holds rebalancers[vault]
@@ -22,7 +22,7 @@ services:
   keeper:
     # commit-tagged, never :latest — autoredeploy on a moving tag restarts the
     # keeper every ~60s and still looks healthy. keep autoredeploy OFF.
-    image: galacticcouncil/gamma-keeper:72f13b1
+    image: galacticcouncil/gamma-keeper:64f8637
     environment:
       # --- global: one value for the whole process ---
       PRIVATE_KEY: '0x<64 hex — the keeper key for 0x0B0bE14C1158Ba09B720812e70F819366614Cb96>'
