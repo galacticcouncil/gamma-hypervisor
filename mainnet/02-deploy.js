@@ -165,6 +165,10 @@ async function main() {
     ]);
     const name = env("VAULT_NAME", `Gamma ${sym0}-${sym1}`);
     const symbol = env("VAULT_SYMBOL", `g${sym0}-${sym1}`);
+    // the derived default reads like "Gamma HOLLAR-aHydratedTBTC"; mainnet must name it
+    if (net === "mainnet" && (!env("VAULT_NAME") || !env("VAULT_SYMBOL"))) {
+      throw new Error(`VAULT_NAME and VAULT_SYMBOL must be set on mainnet (would ship "${name}" / "${symbol}")`);
+    }
     console.log(`  LP token   ${name} (${symbol})`);
     await send(hyperFactory.createHypervisor(token0, token1, fee, name, symbol, await overrides()), "createHypervisor");
     hypervisor = await hyperFactory.getHypervisor(token0, token1, fee);
