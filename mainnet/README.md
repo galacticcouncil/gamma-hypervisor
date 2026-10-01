@@ -137,11 +137,59 @@ Each proposal prints the track it is being submitted on, and flags the
 escalation whenever `GOVERNANCE_TRACK` puts it above its minimum.
 `GOVERNANCE_TRACK=<name|id>` pins one explicitly.
 
-**The Technical Committee is not in this path.** TC reaches
-`0xaa7e…aa7e1` via `dispatchAsEmergencyAdmin`, and no Gamma role is held by that
-address — so `ClearingV2.pause(true)` and the emergency `pullLiquidity` runbook
-are 7-day referenda, not TC motions. That is the economics study's P5 caveat,
-accepted rather than solved.
+**ClearingV2 sits with the Technical Committee on mainnet.** The handover set
+`CLEARING_OWNER` to `0xaa7e…aa7e1`, which the TC reaches via
+`dispatchAsEmergencyAdmin`, so ClearingV2's levers (`pause`, `customDeposit`, …)
+are TC motions or Root, not track-9 referenda. `caps` and `pause` above still
+dispatch as `0xaa7e…aa7e0` and would enact `Ok` while changing nothing; the cap
+has its own script, below. The emergency `pullLiquidity` runbook goes through
+Admin, which stays with `0xaa7e…aa7e0`: a 7-day referendum. That half of the
+economics study's P5 caveat stands.
+
+## Raising the share cap (Technical Committee)
+
+`12-tc-caps.js` prints the motion that sets a new `maxTotalSupply`. It needs
+nothing from the launch operator: the mainnet addresses are pre-filled in
+`.env.tc-caps.example` and checked on chain before use.
+
+```bash
+cp .env.tc-caps.example .env.tc-caps
+ENV_FILE=.env.tc-caps node 12-tc-caps.js 250000     # the new cap, in shares
+```
+
+The cap is a share count, not USD (see *Things that will bite*); the script
+prints what the new cap is worth at today's value per share. Only
+`maxTotalSupply` changes: the per-deposit limits and `customDepositDelta` are
+read from the chain and passed back as they are.
+
+Before building anything it refuses an owner other than `0xaa7e…aa7e1`, a vault
+ClearingV2 does not know, a zero `customDepositDelta` with the override on, the
+cap already in place, a cap at or below the shares that exist (that blocks
+every deposit; `pause` is the tool for that), too little gas on
+`0xaa7e…aa7e1`, and a `customDeposit` that reverts when dry-run as it.
+
+What it prints, and what happens next:
+
+1. **The proposal**: `dispatcher.dispatchAsEmergencyAdmin(evm.call(customDeposit))`,
+   its hash, and the length and weight bounds `close` needs.
+2. **The motion**: `technicalCommittee.propose(threshold, proposal, lengthBound)`,
+   with a polkadot.js Apps link that opens it ready to sign. The threshold is
+   read live: `TechCommitteeMajority` is at least half, so 4 of today's 7.
+3. A member submits it. Voting starts empty: the proposer's aye is **not**
+   automatic, so 4 members vote aye, the proposer included.
+4. Anyone closes it with the printed bounds.
+5. Read `ClearingV2.positions(vault).maxTotalSupply`. The dispatcher reports
+   `Ok` even when the inner `evm.call` reverts, so this read is the only proof.
+
+The motion pins a max gas price (`eth_gasPrice × GAS_PRICE_MULT`, 20 by
+default). It still pays only the base fee, but fails if the base fee rises past
+that cap before the close, and a motion can stay open for 5 days.
+
+Rehearsed on a chopsticks fork of mainnet at block 14,948,259: proposed, voted
+4 of 7 and closed by the real members with mock signatures, the cap went from
+150,000 to 250,000 shares, the other limits were unchanged, and a 100-HOLLAR
+deposit that reverted before minted 312.68 shares after. `npm run fork`, then
+`npm run test:fork` in a second terminal, runs `test/fork/tc-caps.fork.test.js`.
 
 ## What the handover actually moves
 
@@ -219,7 +267,7 @@ leaving them keeps the whole Model B story theoretical. That key could:
 | Launch band | ±10% = `BASE_HALF_WIDTH_MULT=16` at spacing 60 | ALM spec §D1 (D5) |
 | Proxy caps | `maxTranslation` 500, `maxWidth` 300, `minInterval` 6h | ALM spec §C |
 | ClearingV2 | `twapInterval` 3600, `priceThreshold` 10_100 (1%) | ALM spec §B |
-| `maxTotalSupply` | ≈ $150k of shares at launch | economics study P4 |
+| `maxTotalSupply` | 150,000 shares — a share count, not USD (≈ $150k only at launch) | economics study P4 |
 | Gamma fee divisor | 255 (≈0.4%) at launch | ALM spec §H D3 |
 | Admin's admin | `0xaa7e…aa7e0`, not a multisig | economics study P5 |
 | `directDeposit` | off | ALM spec §B |
@@ -240,6 +288,13 @@ leaving them keeps the whole Model B story theoretical. That key could:
   constructor values apply. `maxTotalSupply` is different again — it is checked
   in `clearShares` *after* the mint, so an over-cap seed reverts the whole
   enacted transaction.
+- **`maxTotalSupply` caps shares, not USD.** `clearShares` compares
+  `totalSupply()` with it and reads no price, so the dollar size of a full
+  vault floats with the aDOT price and the vault's own gains and losses.
+  "≈ $150k" held only at the first deposit, which mints one share per HOLLAR
+  of value. On 2026-09-23 a share was worth 0.914 HOLLAR, so the
+  150,000-share cap filled at ~137,100 HOLLAR. To size a new cap, divide the
+  dollar target by the value per share at the time, and expect it to drift.
 - **The seed's allowance goes to the Hypervisor, not UniProxy.** `UniProxy`
   forwards `from = msg.sender` and the Hypervisor is what calls `transferFrom`.
   Approving UniProxy compiles, submits, enacts, and reverts.
