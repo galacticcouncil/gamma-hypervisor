@@ -6,6 +6,11 @@
  *
  * Resumable and idempotent. Every configuration step reads current chain state
  * first, so a re-run after a dropped transaction repeats only what is missing.
+ *
+ * Multi-pool launch: with POOL_FILE set, every run adds ONE vault to the shared
+ * stack named by STACK — the first run deploys the shared contracts, later runs
+ * resume them from deployments/<net>-<STACK>-state.json. Each pool gets its own
+ * record and its own keeper vault file (keeper/vaults/<net>-<STACK>/<pool>.json).
  */
 
 const fs = require("fs");
@@ -18,11 +23,14 @@ const {
   isMainnet,
   resolveAssetAddress,
   sortTokens,
+  feedAIsToken0,
+  statePath,
+  saveDeployments,
   deployContract,
   gasOverrides,
   waitForSuccess,
   loadDeployments,
-  saveJson,
+  REPO,
   ABI,
 } = require("./lib");
 
@@ -107,6 +115,13 @@ async function main() {
     await sub.disconnect();
   }
   const [token0, token1] = sortTokens(addrA, addrB);
+  // The pinned order decides which side every later price read lands on, so a
+  // pool file must pin it and the pin must match the registry.
+  const pinned = Boolean(env("EXPECT_TOKEN0") && env("EXPECT_TOKEN1"));
+  if (env("POOL_NAME") && !pinned) throw new Error("a pool file must set EXPECT_TOKEN0 and EXPECT_TOKEN1");
+  if (pinned && feedAIsToken0() !== (token0.toLowerCase() === addrA.toLowerCase())) {
+    throw new Error(`EXPECT_TOKEN0/EXPECT_TOKEN1 disagree with the registry sort: token0 is ${token0}`);
+  }
 
   const factory = new ethers.Contract(v3Factory, ABI.factory, provider);
   const derived = await factory.getPool(token0, token1, fee);
@@ -114,10 +129,10 @@ async function main() {
     throw new Error(`factory ${v3Factory} maps the pair to ${derived}, not V3_POOL ${poolAddress} — refusing to deploy`);
   }
 
-  const statePath = path.join(__dirname, "deployments", `${net}-state.json`);
-  fs.mkdirSync(path.dirname(statePath), { recursive: true });
-  const state = await loadState(statePath, provider, rpc);
-  const persist = () => fs.writeFileSync(statePath, JSON.stringify(state, null, 2) + "\n");
+  const stateFile = statePath(net);
+  fs.mkdirSync(path.dirname(stateFile), { recursive: true });
+  const state = await loadState(stateFile, provider, rpc);
+  const persist = () => fs.writeFileSync(stateFile, JSON.stringify(state, null, 2) + "\n");
 
   console.log(`\n=== Deploying Gamma -> ${rpc} (${net}) ===`);
   console.log(`  deployer   ${deployer}`);
@@ -150,13 +165,20 @@ async function main() {
     ]);
     const name = env("VAULT_NAME", `Gamma ${sym0}-${sym1}`);
     const symbol = env("VAULT_SYMBOL", `g${sym0}-${sym1}`);
+    // the derived default reads like "Gamma HOLLAR-aHydratedTBTC"; mainnet must name it
+    if (net === "mainnet" && (!env("VAULT_NAME") || !env("VAULT_SYMBOL"))) {
+      throw new Error(`VAULT_NAME and VAULT_SYMBOL must be set on mainnet (would ship "${name}" / "${symbol}")`);
+    }
     console.log(`  LP token   ${name} (${symbol})`);
     await send(hyperFactory.createHypervisor(token0, token1, fee, name, symbol, await overrides()), "createHypervisor");
     hypervisor = await hyperFactory.getHypervisor(token0, token1, fee);
     if (hypervisor === ethers.ZeroAddress) throw new Error("createHypervisor did not register a vault");
   }
-  state.hypervisor = hypervisor;
-  persist();
+  // A shared stack holds many vaults; each pool's own record carries its address.
+  if (!env("POOL_NAME")) {
+    state.hypervisor = hypervisor;
+    persist();
+  }
   console.log(`  Hypervisor         ${hypervisor}`);
 
   const vault = new ethers.Contract(hypervisor, ABI.hypervisor, wallet);
@@ -348,7 +370,9 @@ async function main() {
     governance,
     keeper,
     feeRecipient: env("FEE_RECIPIENT") || null,
-    uniswap: { v3Factory, pool: poolAddress, fee, token0, token1 },
+    pool: env("POOL_NAME") || null,
+    stack: env("POOL_NAME") ? env("STACK") : null,
+    uniswap: { v3Factory, pool: poolAddress, fee, token0, token1, tokenA: addrA },
     gamma: {
       hypervisorFactory: state.hypervisorFactory,
       hypervisor,
@@ -373,11 +397,64 @@ async function main() {
       posture,
     },
   };
-  const p = saveJson(path.join("deployments", `${net}.json`), record);
+  const p = saveDeployments(net, record);
   console.log(`\n  Wrote ${p}`);
+  if (env("POOL_NAME")) console.log(`  Wrote ${writeKeeperVaultFile(net, record)}`);
   console.log("\n=== Gamma stack deployed in the BOOTSTRAP posture ===");
   console.log("  The deploy key still owns every contract and the vault has no band.");
   console.log("  Next: ENV_FILE=<file> npm run handover");
+}
+
+/**
+ * This pool's keeper vault file: every setting that differs between pools.
+ *
+ * The keeper merges each vault file over its flat environment, and that
+ * environment carries pool 1's values (DOT/USD feed, DOT underlying, a 16x band).
+ * So every per-pool setting is written here explicitly — a key left out would be
+ * inherited from aDOT/HOLLAR, silently. Addresses come from this run's record,
+ * strategy from the pool file, so the band the keeper keeps is the band the
+ * RebalanceProxy caps were sized for.
+ */
+function writeKeeperVaultFile(net, record) {
+  const flag = (key) => {
+    const v = requireEnv(key);
+    if (v !== "true" && v !== "false") throw new Error(`${key} must be true or false, got ${v}`);
+    return v === "true";
+  };
+  const int = (key) => {
+    const v = Number(requireEnv(key));
+    if (!Number.isInteger(v) || v < 0) throw new Error(`${key} must be a non-negative integer`);
+    return v;
+  };
+  const vault = {
+    VAULT: record.gamma.hypervisor,
+    ENTRYPOINT: "proxy",
+    REBALANCE_PROXY: record.gamma.rebalanceProxy,
+    ADMIN_ADDRESS: record.gamma.admin,
+    FEE_RECIPIENT: requireEnv("FEE_RECIPIENT"),
+    BASE_HALF_WIDTH_MULT: int("BASE_HALF_WIDTH_MULT"),
+    LIMIT_WIDTH_MULT: int("LIMIT_WIDTH_MULT"),
+    REBALANCE_THRESHOLD_MULT: int("REBALANCE_THRESHOLD_MULT"),
+    ELEVATED_HALF_WIDTH_MULT: int("ELEVATED_HALF_WIDTH_MULT"),
+    FOLD_ENABLED: flag("FOLD_ENABLED"),
+    MINS_TOLERANCE_BPS: int("MINS_TOLERANCE_BPS"),
+    MIN_INTERVAL_SECS: int("MIN_INTERVAL"),
+    ORACLE_ENABLED: true,
+    ORACLE_FEED0: requireEnv("PRICE_FEED_A"),
+    ORACLE_FEED1: env("PRICE_FEED_B") || null,
+    ORACLE_FEED0_SIDE: feedAIsToken0() ? "token0" : "token1",
+    ORACLE_MAX_AGE_SECS: int("STALE_SECONDS"),
+    MM_UNDERLYING: requireEnv("MM_UNDERLYING"),
+    INDEXER_BASE_ASSET: int("INDEXER_BASE_ASSET"),
+    INDEXER_QUOTE_ASSET: int("INDEXER_QUOTE_ASSET"),
+    COMPOUND_ENABLED: flag("COMPOUND_ENABLED"),
+    // token1 raw units, which differ per pool; 0 = sweep whenever fees accrued
+    COMPOUND_MIN_FEES1: "0",
+  };
+  const file = path.join(REPO, "keeper", "vaults", `${net}-${record.stack}`, `${record.pool}.json`);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify(vault, null, 2) + "\n");
+  return file;
 }
 
 main().catch((e) => {

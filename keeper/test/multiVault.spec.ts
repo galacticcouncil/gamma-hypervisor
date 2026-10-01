@@ -127,6 +127,38 @@ describe('per-vault overrides', () => {
   });
 });
 
+describe('one vault file per pool', () => {
+  const poolFiles = (files: Record<string, unknown>) => {
+    const dir = mkdtempSync(join(tmpdir(), 'keeper-pools-'));
+    return Object.entries(files).map(([name, body]) => {
+      const file = join(dir, name);
+      writeFileSync(file, JSON.stringify(body));
+      return file;
+    });
+  };
+
+  it('reads a comma-separated list of files, each one vault object, in order', () => {
+    const files = poolFiles({ 'adot.json': { VAULT: A }, 'atbtc.json': { VAULT: B, BASE_HALF_WIDTH_MULT: 9 }, 'rest.json': [{ VAULT: C }] });
+    process.env.BASE_HALF_WIDTH_MULT = '16';
+    process.env.VAULTS_FILE = files.join(', ');
+    const { vaults } = loadKeeperConfig();
+    expect(vaults.map((v) => v.VAULT)).toEqual([A, B, C]);
+    expect(vaults.map((v) => v.BASE_HALF_WIDTH_MULT)).toEqual([16, 9, 16]);
+  });
+
+  it('names the pool file whose vault fails validation', () => {
+    const files = poolFiles({ 'adot.json': { VAULT: A }, 'geth.json': { VAULT: B, ENTRYPOINT: 'proxy' } });
+    process.env.VAULTS_FILE = files.join(',');
+    expect(() => loadKeeperConfig()).toThrow(/geth\.json.*REBALANCE_PROXY/);
+  });
+
+  it('names both files when two pools point at the same vault', () => {
+    const files = poolFiles({ 'apaxg.json': { VAULT: B }, 'gsol.json': { VAULT: B } });
+    process.env.VAULTS_FILE = files.join(',');
+    expect(() => loadKeeperConfig()).toThrow(/duplicate vault address.*apaxg\.json.*gsol\.json/i);
+  });
+});
+
 describe('the existing refinements run per vault', () => {
   it('fires ENTRYPOINT=proxy without REBALANCE_PROXY on the offending vault only', () => {
     process.env.VAULTS_JSON = JSON.stringify([

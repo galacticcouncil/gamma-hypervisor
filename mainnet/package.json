@@ -8,8 +8,12 @@
     "deploy": "node 02-deploy.js",
     "handover": "node 03-handover.js",
     "verify": "node 04-verify.js",
+    "transfer-ownership": "node 05-transfer-ownership.js",
+    "seed-wallet": "node 06-seed-from-wallet.js",
+    "verify-explorer": "node 12-verify-explorer.js",
     "rehearse": "node 10-chopsticks-rehearsal.js",
     "all": "bash deploy-all.sh",
+    "launch-pool": "bash launch-pool.sh",
     "test": "node --test"
   },
   "dependencies": {

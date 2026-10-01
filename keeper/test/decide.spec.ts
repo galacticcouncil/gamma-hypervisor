@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { decide, shouldFold, shouldRefreshLimit } from '../src/decide';
+import { decide, shouldDeploySeed, shouldFold, shouldRefreshLimit } from '../src/decide';
 
 const strat = { tickSpacing: 60, baseHalfWidthMult: 10, rebalanceThresholdMult: 5 };
 
@@ -75,6 +75,26 @@ describe('shouldRefreshLimit', () => {
     expect(
       shouldRefreshLimit({ ...limit, limitLower: 0, limitUpper: 0, spotTick: 184146 }).trigger,
     ).toBe(false);
+  });
+});
+
+describe('shouldDeploySeed', () => {
+  const seeded = { baseLiquidity: 0n, limitLiquidity: 0n, totalSupply: 59839725950365109n };
+
+  it('fires when a seed sits idle and nothing is in the pool', () => {
+    const r = shouldDeploySeed(seeded);
+    expect(r.trigger).toBe(true);
+    expect(r.reason).toMatch(/deploying the seed/);
+  });
+
+  it('holds on an empty vault that nobody has deposited into', () => {
+    expect(shouldDeploySeed({ ...seeded, totalSupply: 0n }).trigger).toBe(false);
+  });
+
+  it('holds once either range holds liquidity', () => {
+    expect(shouldDeploySeed({ ...seeded, baseLiquidity: 1n }).trigger).toBe(false);
+    // a one-sided vault can park everything in the limit; that is not a seed
+    expect(shouldDeploySeed({ ...seeded, limitLiquidity: 1n }).trigger).toBe(false);
   });
 });
 

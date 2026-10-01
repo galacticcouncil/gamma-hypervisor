@@ -87,7 +87,7 @@ fire, push the pool price with a large swap, then wait `DWELL_SECS`.
 ## How it decides (each block)
 
 1. read `pool.slot0()` (spot tick) and the vault's `baseLower/baseUpper`;
-2. **trigger** if spot left the band, or drifted more than `REBALANCE_THRESHOLD_MULT × tickSpacing` from its center; with no drift trigger, a stranded limit fires a **limit refresh** (`LIMIT_REFRESH_ENABLED`), and a half-traversed one fires a **fold at balance** (`FOLD_ENABLED`) — both zero-translation rebalances that leave the base ticks alone;
+2. **trigger** if spot left the band, or drifted more than `REBALANCE_THRESHOLD_MULT × tickSpacing` from its center, or the vault holds shares with nothing in the pool — a fresh **seed**, which with compounding off nothing else would ever mint (`shouldDeploySeed`); with no trigger, a stranded limit fires a **limit refresh** (`LIMIT_REFRESH_ENABLED`), and a half-traversed one fires a **fold at balance** (`FOLD_ENABLED`) — both zero-translation rebalances that leave the base ticks alone;
 3. **dwell** — the trigger must hold continuously for `DWELL_SECS`;
 4. **cooldown** — `MIN_INTERVAL_SECS`, and the proxy's on-chain `minInterval`;
 5. **TWAP gate** — window clamped to the pool's actual history; skip if `|spot − TWAP| > MAX_DEV_TICKS`. The TWAP tick becomes the **placement** tick;
@@ -235,12 +235,15 @@ meaning and becomes the default *for every vault*. On top of that:
 | var | meaning |
 |---|---|
 | `VAULTS_JSON` | a JSON **array** of per-vault override objects, inline |
-| `VAULTS_FILE` | a path to a file containing that same array |
+| `VAULTS_FILE` | a path to a file containing that same array — or several paths, comma-separated, each file holding one vault object (one file per pool) |
 
 `VAULTS_FILE` wins if both are set — a file is the deliberate, reviewable form, and
 a leftover inline `VAULTS_JSON` must not quietly beat it. **With neither set the
 keeper synthesises a one-element list from `VAULT`**, so an existing single-vault
-deployment runs unchanged.
+deployment runs unchanged. Once a list is set, the flat `VAULT` is no longer a
+vault of its own: to keep aDOT/HOLLAR in the same process, list it first.
+On mainnet the list is `deploy/vaults.mainnet.json`, mounted as a swarm config
+at `/run/vaults.json` — never baked into the image.
 
 Each array element is a *partial*: it is merged over the defaults and then validated
 with the same refinements, **per vault**. A key set to JSON `null` drops the
@@ -476,6 +479,13 @@ a normal market as a crash.
 Harvest fees, re-mint the same ticks. It does not move the band, so it is not
 bound by the proxy's `minInterval` — and its cadence sets how often the fee
 recipient is actually paid.
+
+**Off on the mainnet stack** (`COMPOUND_ENABLED=false`), for the reason below.
+A seed does not need it: a vault with shares and nothing in the pool fires an
+ordinary re-center (step 2 above), behind the dwell, cooldown, price gates and
+mins every rebalance has. The same trigger re-mints a vault that governance
+emptied with `Admin.pullLiquidity`, so to keep one out of the pool, remove it
+from the keeper's `VAULTS_FILE` first.
 
 Runs through `Admin.compound`, which is **onlyAdvisor** — a different role from
 the rebalancer. The deploy scripts set the keeper as advisor via
