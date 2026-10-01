@@ -38,52 +38,10 @@ services:
       INDEXER_TIMEOUT_MS: '5000'
       MM_DATA_PROVIDER: '0xdf18300261edfF47b28c6a6adBCBCf468B52e5a5'
 
-      # --- vaults: the mounted list, read in order; a list replaces VAULT ---
-      # pools 2-5 join it once their ownership has moved (the keeper
-      # rebalances through Admin)
+      # --- vaults: the mounted list, one self-contained entry per pool ---
+      # every per-vault setting lives in deploy/vaults.mainnet.json, none here:
+      # a vault key left in this env would become a default for every pool
       VAULTS_FILE: /run/vaults.json
-
-      # --- per-vault defaults = pool 1 (aDOT/HOLLAR) as it runs live ---
-      # every vault file inherits these unless it overrides them. the cl2 files
-      # set addresses, feeds, underlying, bands, fold, compound and min interval
-      # themselves; the rest below (dwell, twap, dev caps, regime, refresh) is
-      # shared, so a change here changes every pool.
-      ENTRYPOINT: proxy
-      REBALANCE_PROXY: '0x8B7Dd119b7edb85D9cF166129DBec5D88DC78C94'
-      ADMIN_ADDRESS: '0x8fc8a0d7cb9c6B2366Ec08f1Bf03067D54b67bc5'
-      FEE_RECIPIENT: '0x6d6f646c70792f74727372790000000000000000'
-      BASE_HALF_WIDTH_MULT: '16'
-      LIMIT_WIDTH_MULT: '16'
-      ELEVATED_HALF_WIDTH_MULT: '30'
-      REBALANCE_THRESHOLD_MULT: '11'
-      LIMIT_REFRESH_ENABLED: 'true'
-      LIMIT_REFRESH_TICKS: '120'
-      FOLD_ENABLED: 'true'
-      FOLD_MIN_SHARE: '0.4'
-      FOLD_MIN_LIMIT_SHARE: '0'
-      MIN_INTERVAL_SECS: '21600'
-      DWELL_BLOCKS: '900'
-      TWAP_ENABLED: 'true'
-      TWAP_WINDOW_SECS: '3600'
-      MIN_TWAP_WINDOW_SECS: '3000'
-      MAX_DEV_TICKS: '100'
-      ALLOW_UNSAFE_SPOT: 'false'
-      MINS_TOLERANCE_BPS: '1000'
-      ORACLE_ENABLED: 'true'
-      ORACLE_FEED0: '0xFBCa0A6dC5B74C042DF23025D99ef0F1fcAC6702'
-      ORACLE_FEED0_SIDE: token0
-      ORACLE_MAX_AGE_SECS: '28800'
-      ORACLE_MAX_DEV_TICKS: '200'
-      REGIME_ENABLED: 'true'
-      REGIME_REENTRY_SECS: '7200'
-      VOL_RATIO_ELEVATED: '3'
-      VOL_BASELINE_DAYS: '30'
-      VOL_BASELINE_REFRESH_SECS: '3600'
-      MM_UNDERLYING: '0x0000000000000000000000000000000100000005'
-      INDEXER_BASE_ASSET: '5'
-      INDEXER_QUOTE_ASSET: '10'
-      COMPOUND_ENABLED: 'true'
-      COMPOUND_INTERVAL_SECS: '3600'
     configs:
       - source: gamma_vaults_v1
         target: /run/vaults.json
