@@ -188,9 +188,21 @@ async function readFeed0(feed: string, pool: Pool, p: ethers.providers.Provider)
 export interface Memo {
   failures: number;
   lastOkTs: number | null;
+  /** when the limit was first seen past the refresh threshold; null while it is not. */
+  strandedSince: number | null;
 }
 
-export const blankMemo = (): Memo => ({ failures: 0, lastOkTs: null });
+export const blankMemo = (): Memo => ({ failures: 0, lastOkTs: null, strandedSince: null });
+
+/** how long the limit has been stranded, starting the clock on the first sighting. */
+export function strandedFor(memo: Memo, stranded: boolean, now: number): number {
+  if (!stranded) {
+    memo.strandedSince = null;
+    return 0;
+  }
+  memo.strandedSince ??= now;
+  return now - memo.strandedSince;
+}
 
 const fmt = (w: ethers.BigNumber) => ethers.utils.formatEther(w);
 
@@ -269,10 +281,13 @@ export async function runChecks(
   // exists to fix it, so if it has not, something is stopping it. A keeper with
   // the refresh disabled will never fix it, so there is nothing to blame.
   const outsideBy = tick >= limHi ? tick - limHi : tick < limLo ? limLo - tick : 0;
-  if (t.LIMIT_REFRESH_ENABLED && limHi > limLo && outsideBy > t.LIMIT_REFRESH_TICKS && since > allowance) {
+  // the keeper arms a refresh and holds it for its dwell before acting, so a
+  // limit that only just crossed is work in progress, not a failure
+  const strandedSecs = strandedFor(memo, t.LIMIT_REFRESH_ENABLED && limHi > limLo && outsideBy > t.LIMIT_REFRESH_TICKS, now);
+  if (strandedSecs > t.REBALANCE_GRACE_SECS && since > allowance) {
     push({ key: 'limit-stranded', severity: 'warning',
       title: 'Limit position is stranded out of range',
-      detail: `spot ${tick} is ${outsideBy} ticks outside the limit [${limLo},${limHi}] (refresh fires past ${t.LIMIT_REFRESH_TICKS}), and nothing has re-placed it for ${Math.round(since / 3600)}h. ` +
+      detail: `spot ${tick} is ${outsideBy} ticks outside the limit [${limLo},${limHi}] (refresh fires past ${t.LIMIT_REFRESH_TICKS}), for ${Math.round(strandedSecs / 60)} min, and nothing has re-placed it for ${Math.round(since / 3600)}h. ` +
         `${limVal.toFixed(0)} of ${nav.toFixed(0)} NAV (${nav > 0 ? ((limVal / nav) * 100).toFixed(0) : '?'}%) is parked out of range earning nothing.` });
   }
 
