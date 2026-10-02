@@ -190,18 +190,27 @@ export interface Memo {
   lastOkTs: number | null;
   /** when the limit was first seen past the refresh threshold; null while it is not. */
   strandedSince: number | null;
+  /** when pool vs feed was first seen past DIVERGENCE_BPS; null while it is not. */
+  divergedSince: number | null;
 }
 
-export const blankMemo = (): Memo => ({ failures: 0, lastOkTs: null, strandedSince: null });
+export const blankMemo = (): Memo => ({ failures: 0, lastOkTs: null, strandedSince: null, divergedSince: null });
+
+type SinceKey = 'strandedSince' | 'divergedSince';
+
+/** how long a condition has held, starting the clock on the first sighting and resetting when it clears. */
+export function heldFor(memo: Memo, key: SinceKey, holds: boolean, now: number): number {
+  if (!holds) {
+    memo[key] = null;
+    return 0;
+  }
+  memo[key] ??= now;
+  return now - memo[key]!;
+}
 
 /** how long the limit has been stranded, starting the clock on the first sighting. */
 export function strandedFor(memo: Memo, stranded: boolean, now: number): number {
-  if (!stranded) {
-    memo.strandedSince = null;
-    return 0;
-  }
-  memo.strandedSince ??= now;
-  return now - memo.strandedSince;
+  return heldFor(memo, 'strandedSince', stranded, now);
 }
 
 const fmt = (w: ethers.BigNumber) => ethers.utils.formatEther(w);
@@ -349,9 +358,12 @@ export async function runChecks(
       });
     }
 
-    if (bps > t.DIVERGENCE_BPS) {
+    // a heartbeat feed lags every fast move and small fills walk a thin pool, so
+    // a brief gap is noise; report it only once it has outlasted the grace
+    const divergedSecs = heldFor(memo, 'divergedSince', bps > t.DIVERGENCE_BPS, now);
+    if (divergedSecs > t.DIVERGENCE_GRACE_SECS) {
       push({ key: 'divergence', severity: 'warning', title: 'Pool has drifted from the oracle',
-        detail: `pool ${px.toFixed(6)} vs feed ${feedPx.toFixed(6)} = ${bps.toFixed(0)} bps (limit ${t.DIVERGENCE_BPS}). With liquidity present this should be arbitraged away; persistent drift means no arbitrage is reaching the pool.` });
+        detail: `pool ${px.toFixed(6)} vs feed ${feedPx.toFixed(6)} = ${bps.toFixed(0)} bps (limit ${t.DIVERGENCE_BPS}) for ${Math.round(divergedSecs / 60)} min. With liquidity present this should be arbitraged away; persistent drift means no arbitrage is reaching the pool.` });
     }
   }
 

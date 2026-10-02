@@ -109,6 +109,8 @@ const Env = z
     LIMIT_REFRESH_TICKS: posInt.default(120),
     /** Pool vs oracle. Matches the deploy config's MAX_DIVERGENCE_BPS. */
     DIVERGENCE_BPS: posInt.default(200),
+    /** a thin pool and a heartbeat feed disagree briefly on every fast move; only report it if it lasts. */
+    DIVERGENCE_GRACE_SECS: z.coerce.number().int().min(0).default(3600),
     /** Feed age ceiling; mirrors the keeper's ORACLE_MAX_AGE_SECS. */
     STALE_SECONDS: posInt.default(28800),
   })

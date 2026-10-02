@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { blankMemo, strandedFor } from '../src/checks';
+import { blankMemo, heldFor, strandedFor } from '../src/checks';
 
 describe('strandedFor: how long the limit has sat past the refresh threshold', () => {
   it('starts the clock on the first sighting, not before', () => {
@@ -24,5 +24,29 @@ describe('strandedFor: how long the limit has sat past the refresh threshold', (
     strandedFor(m, true, 0);
     expect(strandedFor(m, true, 1890 + 300)).toBeLessThan(7200);
     expect(strandedFor(m, true, 7201)).toBeGreaterThan(7200);
+  });
+});
+
+describe('heldFor: divergence must outlast its grace before it is reported', () => {
+  it('a 20-minute pool vs feed gap stays under the default 3600s grace', () => {
+    const m = blankMemo();
+    heldFor(m, 'divergedSince', true, 0);
+    expect(heldFor(m, 'divergedSince', true, 1200)).toBeLessThan(3600);
+    expect(heldFor(m, 'divergedSince', false, 1500)).toBe(0);
+    expect(m.divergedSince).toBeNull();
+  });
+
+  it('a gap that persists past the grace is reported', () => {
+    const m = blankMemo();
+    heldFor(m, 'divergedSince', true, 0);
+    expect(heldFor(m, 'divergedSince', true, 6000)).toBeGreaterThan(3600);
+  });
+
+  it('keeps the stranded and divergence clocks independent', () => {
+    const m = blankMemo();
+    heldFor(m, 'divergedSince', true, 100);
+    strandedFor(m, true, 500);
+    expect(m.divergedSince).toBe(100);
+    expect(m.strandedSince).toBe(500);
   });
 });
