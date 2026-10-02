@@ -78,7 +78,7 @@ describe('config', () => {
         REBALANCE_THRESHOLD_MULT: 11, MIN_INTERVAL_SECS: 21600, REBALANCE_GRACE_SECS: 7200,
         TWAP_ENABLED: true, TWAP_WINDOW_SECS: 3600, MIN_TWAP_WINDOW_SECS: 3000,
         ORACLE_MAX_DEV_TICKS: 50, STALE_SECONDS: 28800,
-        LIMIT_REFRESH_ENABLED: true, LIMIT_REFRESH_TICKS: 120, DIVERGENCE_BPS: 200,
+        LIMIT_REFRESH_ENABLED: true, LIMIT_REFRESH_TICKS: 120, DIVERGENCE_BPS: 200, DIVERGENCE_GRACE_SECS: 3600,
       },
     });
     expect(loadPoolSpecs(loadConfig(flat))).toEqual({ source: 'env', specs: [s] });
@@ -125,6 +125,7 @@ const entry = {
   MONITOR_CLEARING: A('35'),
   MONITOR_GRACE_SECS: 7200,
   MONITOR_DIVERGENCE_BPS: 200,
+  MONITOR_DIVERGENCE_GRACE_SECS: 3600,
   UI_START_BLOCK: 14_000_000,
 };
 
@@ -141,7 +142,7 @@ describe('descriptor', () => {
   it('KEY_MAP covers every per-pool flat key and points at real descriptor keys', () => {
     const flatPoolKeys = ['VAULT', 'POOL', 'CLEARING', 'REBALANCE_PROXY', 'PRICE_FEED', 'PRICE_FEED_SIDE', 'REBALANCE_THRESHOLD_MULT',
       'MIN_INTERVAL_SECS', 'REBALANCE_GRACE_SECS', 'ORACLE_MAX_DEV_TICKS', 'TWAP_ENABLED', 'TWAP_WINDOW_SECS', 'MIN_TWAP_WINDOW_SECS',
-      'LIMIT_REFRESH_ENABLED', 'LIMIT_REFRESH_TICKS', 'DIVERGENCE_BPS', 'STALE_SECONDS'];
+      'LIMIT_REFRESH_ENABLED', 'LIMIT_REFRESH_TICKS', 'DIVERGENCE_BPS', 'DIVERGENCE_GRACE_SECS', 'STALE_SECONDS'];
     expect(Object.keys(KEY_MAP).sort()).toEqual(flatPoolKeys.sort());
     for (const [flatKey, descKey] of Object.entries(KEY_MAP)) {
       if (descKey === null) { expect(flatKey).toBe('POOL'); continue; }
@@ -194,7 +195,7 @@ describe('descriptor', () => {
     const { TWAP_WINDOW_SECS, MIN_TWAP_WINDOW_SECS, LIMIT_REFRESH_TICKS, ...rest } = entry;
     expect(() => specsFromDescriptor([{ ...rest, TWAP_ENABLED: false, LIMIT_REFRESH_ENABLED: false }])).not.toThrow();
     // the monitor's own keys do default
-    const { MONITOR_GRACE_SECS, MONITOR_DIVERGENCE_BPS, ...noMon } = entry;
+    const { MONITOR_GRACE_SECS, MONITOR_DIVERGENCE_BPS, MONITOR_DIVERGENCE_GRACE_SECS, ...noMon } = entry;
     const [s] = specsFromDescriptor([noMon]);
     expect(s.thresholds.REBALANCE_GRACE_SECS).toBe(7200);
     expect(s.thresholds.DIVERGENCE_BPS).toBe(200);

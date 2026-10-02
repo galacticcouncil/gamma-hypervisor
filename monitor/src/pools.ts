@@ -24,6 +24,8 @@ export interface Thresholds {
   LIMIT_REFRESH_ENABLED: boolean;
   LIMIT_REFRESH_TICKS: number;
   DIVERGENCE_BPS: number;
+  /** how long pool vs feed must stay past DIVERGENCE_BPS before it is reported. */
+  DIVERGENCE_GRACE_SECS: number;
 }
 
 /** what env or the descriptor say; nothing here needs the chain. */
@@ -63,6 +65,7 @@ export const KEY_MAP = {
   STALE_SECONDS: 'ORACLE_MAX_AGE_SECS',
   REBALANCE_GRACE_SECS: 'MONITOR_GRACE_SECS',
   DIVERGENCE_BPS: 'MONITOR_DIVERGENCE_BPS',
+  DIVERGENCE_GRACE_SECS: 'MONITOR_DIVERGENCE_GRACE_SECS',
   REBALANCE_THRESHOLD_MULT: 'REBALANCE_THRESHOLD_MULT',
   MIN_INTERVAL_SECS: 'MIN_INTERVAL_SECS',
   ORACLE_MAX_DEV_TICKS: 'ORACLE_MAX_DEV_TICKS',
@@ -107,6 +110,7 @@ const Entry = z
     MONITOR_CLEARING: addr.optional(),
     MONITOR_GRACE_SECS: posInt.default(7200),
     MONITOR_DIVERGENCE_BPS: posInt.default(200),
+    MONITOR_DIVERGENCE_GRACE_SECS: z.coerce.number().int().min(0).default(3600),
     ORACLE_ENABLED: jbool,
     ORACLE_FEED0: addr.optional(),
     ORACLE_FEED1: addr.optional(),
@@ -162,6 +166,7 @@ export function specFromEnv(cfg: Config): PoolSpec {
       LIMIT_REFRESH_ENABLED: cfg.LIMIT_REFRESH_ENABLED,
       LIMIT_REFRESH_TICKS: cfg.LIMIT_REFRESH_TICKS,
       DIVERGENCE_BPS: cfg.DIVERGENCE_BPS,
+      DIVERGENCE_GRACE_SECS: cfg.DIVERGENCE_GRACE_SECS,
     },
   };
 }
@@ -199,6 +204,7 @@ export function specsFromDescriptor(doc: unknown, where = 'VAULTS_FILE'): PoolSp
         LIMIT_REFRESH_ENABLED: e.LIMIT_REFRESH_ENABLED,
         LIMIT_REFRESH_TICKS: e.LIMIT_REFRESH_TICKS ?? 0,
         DIVERGENCE_BPS: e.MONITOR_DIVERGENCE_BPS,
+        DIVERGENCE_GRACE_SECS: e.MONITOR_DIVERGENCE_GRACE_SECS,
       },
     } satisfies PoolSpec;
   });
