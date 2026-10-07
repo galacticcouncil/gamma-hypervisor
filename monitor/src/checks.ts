@@ -192,11 +192,13 @@ export interface Memo {
   strandedSince: number | null;
   /** when pool vs feed was first seen past DIVERGENCE_BPS; null while it is not. */
   divergedSince: number | null;
+  /** when the base was first seen past the rebalance threshold; null while it is not. */
+  driftSince: number | null;
 }
 
-export const blankMemo = (): Memo => ({ failures: 0, lastOkTs: null, strandedSince: null, divergedSince: null });
+export const blankMemo = (): Memo => ({ failures: 0, lastOkTs: null, strandedSince: null, divergedSince: null, driftSince: null });
 
-type SinceKey = 'strandedSince' | 'divergedSince';
+type SinceKey = 'strandedSince' | 'divergedSince' | 'driftSince';
 
 /** how long a condition has held, starting the clock on the first sighting and resetting when it clears. */
 export function heldFor(memo: Memo, key: SinceKey, holds: boolean, now: number): number {
@@ -272,10 +274,14 @@ export async function runChecks(
   const lastRebalance = Number(await proxy.lastRebalance(pool.vault));
   const since = now - lastRebalance;
   const allowance = t.MIN_INTERVAL_SECS + t.REBALANCE_GRACE_SECS;
-  if (lo !== hi && drift > threshold && since > allowance) {
+  // the grace covers the keeper's dwell, so it runs from when drift started, not from the
+  // last rebalance: after a quiet week that one is always past, and a fresh crossing would
+  // page while the keeper is still correctly dwelling
+  const driftSecs = heldFor(memo, 'driftSince', lo !== hi && drift > threshold, now);
+  if (driftSecs > t.REBALANCE_GRACE_SECS && since > allowance) {
     push({ key: 'rebalance-overdue', severity: 'critical',
       title: 'A rebalance was due and has not happened',
-      detail: `drift ${drift} > threshold ${threshold} ticks, and the last rebalance was ${Math.round(since / 3600)}h ago (allowance ${Math.round(allowance / 3600)}h). No price gate explains it — check the keeper is running and its key is funded.` });
+      detail: `drift ${drift} > threshold ${threshold} ticks for ${Math.round(driftSecs / 60)} min, and the last rebalance was ${Math.round(since / 3600)}h ago (allowance ${Math.round(allowance / 3600)}h). No price gate explains it — check the keeper is running and its key is funded.` });
   }
 
   // nav in token1, human units, from the pool's own decimals
