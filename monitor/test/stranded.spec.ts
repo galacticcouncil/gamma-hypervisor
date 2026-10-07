@@ -50,3 +50,32 @@ describe('heldFor: divergence must outlast its grace before it is reported', () 
     expect(m.strandedSince).toBe(500);
   });
 });
+
+describe('heldFor: rebalance-overdue waits out the keeper dwell from when drift started', () => {
+  // 2026-10-07 aPAXG/HOLLAR: last rebalance 144h back, drift crossed 180 at ~12:25 UTC,
+  // the monitor paged at 12:43, the keeper rebalanced at 13:09 after its ~45 min dwell
+  const crossed = 0, paged = 18 * 60, rebalanced = 44 * 60;
+
+  it('a dwell-length crossing stays under the 7200s grace', () => {
+    const m = blankMemo();
+    heldFor(m, 'driftSince', true, crossed);
+    expect(heldFor(m, 'driftSince', true, paged)).toBeLessThan(7200);
+    expect(heldFor(m, 'driftSince', true, rebalanced)).toBeLessThan(7200);
+    expect(heldFor(m, 'driftSince', false, rebalanced + 60)).toBe(0);
+    expect(m.driftSince).toBeNull();
+  });
+
+  it('drift the keeper never acts on is reported once it outlasts the grace', () => {
+    const m = blankMemo();
+    heldFor(m, 'driftSince', true, crossed);
+    expect(heldFor(m, 'driftSince', true, 7201)).toBeGreaterThan(7200);
+  });
+
+  it('runs its own clock beside the stranded and divergence ones', () => {
+    const m = blankMemo();
+    heldFor(m, 'driftSince', true, 10);
+    heldFor(m, 'divergedSince', true, 20);
+    strandedFor(m, true, 30);
+    expect([m.driftSince, m.divergedSince, m.strandedSince]).toEqual([10, 20, 30]);
+  });
+});
