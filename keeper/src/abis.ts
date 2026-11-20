@@ -20,6 +20,7 @@ export const HYPERVISOR_ABI = [
 export const POOL_ABI = [
   'function slot0() view returns (uint160 sqrtPriceX96, int24 tick, uint16 observationIndex, uint16 observationCardinality, uint16 observationCardinalityNext, uint8 feeProtocol, bool unlocked)',
   'function tickSpacing() view returns (int24)',
+  'function fee() view returns (uint24)',
   'function observe(uint32[] secondsAgos) view returns (int56[] tickCumulatives, uint160[] secondsPerLiquidityCumulativeX128)',
   'function observations(uint256 index) view returns (uint32 blockTimestamp, int56 tickCumulative, uint160 secondsPerLiquidityCumulativeX128, bool initialized)',
   // Fee accounting: uncollected fees live here, not in the vault's balance.
@@ -80,3 +81,18 @@ export const MM_SOURCE_ABI = [
 ];
 
 export const ATOKEN_ABI = ['function UNDERLYING_ASSET_ADDRESS() view returns (address)'];
+
+export const ERC20_SPEND_ABI = [
+  'function balanceOf(address) view returns (uint256)',
+  'function allowance(address owner, address spender) view returns (uint256)',
+  'function approve(address spender, uint256 amount) returns (bool)',
+];
+
+// SwapRouter02 (IV3SwapRouter): no deadline field, unlike the v1 SwapRouter
+export const SWAP_ROUTER02_ABI = [
+  'function exactInputSingle((address tokenIn, address tokenOut, uint24 fee, address recipient, uint256 amountIn, uint256 amountOutMinimum, uint160 sqrtPriceLimitX96) params) payable returns (uint256 amountOut)',
+];
+
+export const QUOTER_V2_ABI = [
+  'function quoteExactInputSingle((address tokenIn, address tokenOut, uint256 amountIn, uint24 fee, uint160 sqrtPriceLimitX96) params) returns (uint256 amountOut, uint160 sqrtPriceX96After, uint32 initializedTicksCrossed, uint256 gasEstimate)',
+];

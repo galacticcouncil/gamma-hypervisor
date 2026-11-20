@@ -1,17 +1,18 @@
 import { ethers } from 'ethers';
 import type { Chain, ProxyCaps, VaultCtx } from './chain';
 import { readLastRebalanceTs, readProxyCaps } from './chain';
-import { shouldDeploySeed, shouldFold, shouldRebalance, shouldRefreshLimit, type Trigger } from './decide';
+import { shouldDeploySeed, shouldFold, shouldReanchor, shouldRebalance, shouldRefreshLimit, type Trigger } from './decide';
 import { centeredBand, clampBandTranslation, limitRange } from './ticks';
 import { oldestObservationAgeSecs, readSlot0, readTwapTick } from './pool';
 import { readIdleBalances, readPositions, readTotalAmounts, surplusSide } from './vault';
 import { computeCompoundMins, computeMins, splitForBand } from './mins';
-import { readOracleTick } from './oracle';
-import { priceFromSqrtX96, sqrtPriceFromTick, toFloat } from './price';
+import { readOracleTick, type OracleReading } from './oracle';
+import { priceFromSqrtX96, sqrtPriceFromTick, sqrtX96FromPrice, tickFromPrice, toFloat } from './price';
 import { preflight, type RebalanceArgs } from './preflight';
 import { txOverrides } from './chain';
 import { submitRebalance } from './submit';
 import { compoundOnce } from './compound';
+import { reanchorOnce } from './reanchor';
 import { vaultFees } from './feesOwed';
 import { fetchVolBaseline } from './indexer';
 import { isReservePaused } from './moneyMarket';
@@ -46,7 +47,7 @@ export async function initialState(ctx: VaultCtx): Promise<KeeperState> {
  */
 export function stepDwell(
   ctx: Pick<VaultCtx, 'state' | 'dwellSecs' | 'log'>,
-  field: 'dwellSince' | 'refreshDwellSince' | 'foldDwellSince',
+  field: 'dwellSince' | 'refreshDwellSince' | 'foldDwellSince' | 'reanchorDwellSince',
   trigger: boolean,
   now: number,
   label: string,
@@ -371,6 +372,131 @@ async function runCompound(
   });
 }
 
+// walk a stranded pool to the oracle when no arbitrage will; true only when a swap landed
+export async function runReanchor(ctx: VaultCtx, spotTick: number, now: number): Promise<boolean> {
+  const { cfg, state } = ctx;
+  if (!ctx.oracle || !ctx.reanchor) return false;
+  try {
+    let o: OracleReading;
+    try {
+      o = await readOracleTick({
+        feed0: ctx.oracle.feed0,
+        feed1: ctx.oracle.feed1,
+        feed0Side: cfg.ORACLE_FEED0_SIDE,
+        decimals0: ctx.decimals0,
+        decimals1: ctx.decimals1,
+        nowTs: now,
+      });
+    } catch {
+      // the price gate reports an unreadable feed; a re-anchor just never targets one
+      stepDwell(ctx, 'reanchorDwellSince', false, now, 're-anchor');
+      return false;
+    }
+    const t =
+      o.ageSecs > cfg.ORACLE_MAX_AGE_SECS
+        ? { trigger: false, zeroForOne: false, tooFar: false, reason: 'oracle stale' }
+        : shouldReanchor({
+            spotTick,
+            oracleTick: o.tick,
+            maxDevTicks: cfg.ORACLE_MAX_DEV_TICKS,
+            maxTicks: cfg.REANCHOR_MAX_TICKS,
+          });
+    if (t.tooFar) ctx.log(`re-anchor: ${t.reason}`);
+    if (!stepDwell(ctx, 'reanchorDwellSince', t.trigger, now, 're-anchor')) return false;
+
+    if (state.regime.regime === 'extreme') {
+      ctx.log('re-anchor: regime EXTREME — not trading into it');
+      return false;
+    }
+    const since = now - state.lastReanchorTs;
+    if (state.lastReanchorTs > 0 && since < cfg.REANCHOR_MIN_INTERVAL_SECS) {
+      ctx.log(`re-anchor: min interval (${since}s < ${cfg.REANCHOR_MIN_INTERVAL_SECS}s)`);
+      return false;
+    }
+
+    const side = t.zeroForOne ? 0 : 1;
+    const cap = side === 0 ? cfg.reanchorMaxIn0 : cfg.reanchorMaxIn1;
+    const [tokenIn, tokenOut] = side === 0 ? [ctx.token0, ctx.token1] : [ctx.token1, ctx.token0];
+    const sym = side === 0 ? ctx.symbol0 : ctx.symbol1;
+    if (cap.isZero()) {
+      ctx.log(`re-anchor: REANCHOR_MAX_IN${side} is 0 — not selling ${sym}`);
+      return false;
+    }
+
+    const { provider, signer } = ctx.chain;
+    const [gasBal, held]: [ethers.BigNumber, ethers.BigNumber] = await Promise.all([
+      provider.getBalance(signer.address),
+      tokenIn.balanceOf(signer.address),
+    ]);
+    if (gasBal.lt(cfg.gasFloorWei)) {
+      ctx.log(`re-anchor: gas (WETH) balance ${ethers.utils.formatEther(gasBal)} below floor`);
+      return false;
+    }
+    let amountIn = held.lt(cap) ? held : cap;
+    if (amountIn.isZero()) {
+      if (!cfg.DRY_RUN) {
+        ctx.log(`re-anchor: signer ${signer.address} holds no ${sym} — send it up to ${cap.toString()} raw`);
+        return false;
+      }
+      amountIn = cap;
+    }
+
+    const limit = sqrtX96FromPrice(o.price * Math.pow(10, ctx.decimals1 - ctx.decimals0));
+    let q: { amountOut: ethers.BigNumber; sqrtPriceX96After: ethers.BigNumber };
+    try {
+      q = await ctx.reanchor.quoter.callStatic.quoteExactInputSingle({
+        tokenIn: tokenIn.address,
+        tokenOut: tokenOut.address,
+        amountIn,
+        fee: ctx.reanchor.fee,
+        sqrtPriceLimitX96: limit,
+      });
+    } catch (e: any) {
+      ctx.log(`re-anchor: quote reverted (an empty gap cannot be swapped through) — ${e?.reason ?? e?.message ?? e}`);
+      return false;
+    }
+    if (!q.sqrtPriceX96After.eq(limit)) {
+      const reached = tickFromPrice(priceFromSqrtX96(q.sqrtPriceX96After));
+      ctx.log(
+        `re-anchor: ${amountIn.toString()} raw ${sym} only moves spot to ${reached}, oracle ${o.tick} — ` +
+          'liquidity in the gap, leaving it to arbitrage',
+      );
+      return false;
+    }
+    ctx.log(
+      `re-anchor: sell <=${amountIn.toString()} raw ${sym}, limit at oracle tick ${o.tick} (spot ${spotTick}), ` +
+        `quoted ${q.amountOut.toString()} raw out`,
+    );
+    if (cfg.DRY_RUN) {
+      ctx.log('re-anchor: DRY_RUN, not sending');
+      return false;
+    }
+
+    // stamped before sending, so a reverting swap backs off instead of retrying every block
+    state.lastReanchorTs = now;
+    const hash = await reanchorOnce({
+      signer,
+      router: ctx.reanchor.router,
+      tokenIn: tokenIn.address,
+      tokenOut: tokenOut.address,
+      fee: ctx.reanchor.fee,
+      amountIn,
+      sqrtPriceLimitX96: limit,
+      overrides: await txOverrides(ctx.chain),
+      confirmations: cfg.CONFIRMATIONS,
+      log: ctx.log,
+    });
+    if (!hash) return false;
+    state.reanchorDwellSince = 0;
+    const after = await readSlot0(ctx.pool);
+    ctx.log(`re-anchor: ✓ spot ${spotTick} -> ${after.tick}, oracle ${o.tick} — ${hash}`);
+    return true;
+  } catch (e: any) {
+    ctx.log(`re-anchor: error — ${e?.message ?? e}`);
+    return false;
+  }
+}
+
 /**
  * One vault, one block. The block is passed in rather than fetched: every vault
  * in a cycle sees the same header, and re-reading it per vault would be N round
@@ -475,6 +601,8 @@ export async function evaluate(
         decision.trigger ? decision.reason : refresh.trigger ? refresh.reason : fold.trigger ? fold.reason : decision.reason
       }`,
   );
+
+  if (cfg.REANCHOR_ENABLED && (await runReanchor(ctx, spotTick, now))) return;
 
   // Dwell gates the REBALANCE and the refresh, never the compound: a sweep's
   // risk has nothing to do with whether the band moved. Placement is off the

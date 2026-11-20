@@ -631,7 +631,7 @@ describe('redaction is by value, not by shape', () => {
     expect(union).toEqual(new Set<string>([...GLOBAL_KEYS, ...VAULT_KEYS]));
     // and nothing parsed out of the environment escapes that union
     const cfg = loadKeeperConfig().vaults[0] as unknown as Record<string, unknown>;
-    const derived = new Set(['gasFloorWei', 'compoundMinFees1']);
+    const derived = new Set(['gasFloorWei', 'compoundMinFees1', 'reanchorMaxIn0', 'reanchorMaxIn1']);
     for (const k of Object.keys(cfg)) if (!derived.has(k)) expect(union.has(k)).toBe(true);
   });
 

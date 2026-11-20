@@ -1,5 +1,5 @@
 import { ethers } from 'ethers';
-import { AAVE_ORACLE_ABI, AGGREGATOR_V3_ABI, ATOKEN_ABI, MM_SOURCE_ABI, ERC20_ABI, HYPERVISOR_ABI, POOL_ABI, REBALANCE_PROXY_ABI } from './abis';
+import { AAVE_ORACLE_ABI, AGGREGATOR_V3_ABI, ATOKEN_ABI, MM_SOURCE_ABI, ERC20_ABI, HYPERVISOR_ABI, POOL_ABI, QUOTER_V2_ABI, REBALANCE_PROXY_ABI, SWAP_ROUTER02_ABI } from './abis';
 import { resolveDwellSecs, type Config, type GlobalConfig } from './config';
 import { blankState, type KeeperState } from './state';
 import { log, logTagged } from './log';
@@ -43,6 +43,7 @@ export interface VaultCtx {
   token1: ethers.Contract;
   proxy?: ethers.Contract; // ENTRYPOINT=proxy (Model B)
   oracle?: { feed0: ethers.Contract | MmFeed; feed1?: ethers.Contract }; // ORACLE_ENABLED
+  reanchor?: { router: ethers.Contract; quoter: ethers.Contract; fee: number }; // REANCHOR_ENABLED
   tickSpacing: number;
   decimals0: number;
   decimals1: number;
@@ -172,6 +173,14 @@ export async function createVaultContext(
       }
     : undefined;
 
+  const reanchor = cfg.REANCHOR_ENABLED
+    ? {
+        router: new ethers.Contract(chain.cfg.SWAP_ROUTER!, SWAP_ROUTER02_ABI, signer),
+        quoter: new ethers.Contract(chain.cfg.QUOTER!, QUOTER_V2_ABI, provider),
+        fee: Number(await pool.fee()),
+      }
+    : undefined;
+
   const label = cfg.LABEL ?? `${symbol0}/${symbol1}`;
   const ctx: VaultCtx = {
     chain,
@@ -184,6 +193,7 @@ export async function createVaultContext(
     token1: t1,
     proxy,
     oracle,
+    reanchor,
     tickSpacing,
     decimals0,
     decimals1,
