@@ -136,10 +136,12 @@ fire, push the pool price with a large swap, then wait `DWELL_SECS`.
 | `REANCHOR_MAX_IN0` / `REANCHOR_MAX_IN1` | `0` | dust budget per swap, raw units of the token sold; `0` never sells that side |
 | `REANCHOR_MAX_TICKS` | `1500` | leave a wider gap to an operator |
 | `REANCHOR_MIN_INTERVAL_SECS` | `3600` | min seconds between re-anchor swaps |
+| `REANCHOR_ACTION_INTERVAL_SECS` | `120` | min seconds between re-anchor spend actions (top-ups, bridge mints and clears) |
 | `SWAP_ROUTER` / `QUOTER` | Hydration mainnet SwapRouter02 `0x5a79…4159` / QuoterV2 `0x9D7c…9974` | process-wide; startup fails if either does not serve the pool's factory, so set both on other chains |
 | `POSITION_MANAGER` | Hydration mainnet NonfungiblePositionManager `0xd502…10B3` | process-wide; lays the bridge below; checked against the pool's factory like the router |
 | `REANCHOR_GAS_BUY_IN` | `100000000000000` | gas money (raw) to sell for the token when the signer has neither it nor its underlying; `0` = never |
 | `REANCHOR_GAS_ASSET` | `20` | the gas asset (WETH) that buys it |
+| `REANCHOR_GAS_BUYS_PER_DAY` | `6` | cap on gas buys per 24h across every vault on the signer |
 | **operations** | | |
 | `GAS_FLOOR_WEI` | `0` | skip if signer WETH-gas balance below this |
 | `GAS_LIMIT` | `3000000` | rebalance gas limit |
@@ -213,8 +215,15 @@ the pool's average catches up, then the keeper re-centers as usual.
   state of a one-sided vault after a rebalance (only its own token, on the far side of spot). On
   that revert the keeper lays a **bridge**: one tick-spacing of the other token right past spot
   through `POSITION_MANAGER`, a twentieth of the swap budget at the oracle (bought with gas money
-  when the signer has none), swaps through it on the next block and burns it afterwards. It never
-  lays a second bridge on the path, and clears a stale one off the path first;
+  when the signer has none), swaps through it on the next block and burns it afterwards. A gap
+  counts as empty only on a contract revert with zero active liquidity at spot; an rpc failure is
+  retried. The keeper only touches positions it laid itself (ids kept in memory, so a restart
+  between laying and burning leaves an orphan for an operator), never lays a second bridge on the
+  path, clears a stale one first, and takes a leftover back once no re-anchor needs it;
+- spend actions are spaced by `REANCHOR_ACTION_INTERVAL_SECS` and gas buys capped per day, so moving
+  spot around an empty gap cannot make the keeper spend every block;
+- `router.sell` is encoded from the runtime's metadata, which is re-fetched when the runtime
+  version changes (the http provider gets no upgrade subscription);
 - skipped in the `extreme` regime, on a stale or unreadable feed, and past
   `REANCHOR_MAX_TICKS`.
 

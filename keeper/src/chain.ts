@@ -18,16 +18,16 @@ export interface Chain {
   cfg: GlobalConfig;
   provider: ethers.providers.JsonRpcProvider;
   signer: ethers.Wallet;
-  /** runtime api, connected on first use by a re-anchoring vault */
   substrate?: ApiPromise;
+  // timestamps of re-anchor gas buys, for the daily cap across every vault on this signer
+  gasBuys?: number[];
 }
 
 export interface ReanchorSide {
   assetId: number | null;
   ed: ethers.BigNumber | null;
-  /** set when the token is an aToken: what to supply, and where */
   wrap?: { pool: string; underlying: ethers.Contract; underlyingEd: ethers.BigNumber | null };
-  /** the runtime router has a stored route from the gas asset to this token */
+  // the runtime router has a stored route from the gas asset to this token
   gasRoute: boolean;
 }
 
@@ -82,7 +82,7 @@ export function createChain(cfg: GlobalConfig): Chain {
   const provider = new ethers.providers.JsonRpcProvider(cfg.RPC_URL);
   provider.pollingInterval = cfg.POLL_INTERVAL_MS;
   const signer = new ethers.Wallet(cfg.PRIVATE_KEY, provider);
-  return { cfg, provider, signer };
+  return { cfg, provider, signer, gasBuys: [] };
 }
 
 /**
@@ -254,8 +254,9 @@ async function reanchorSide(
   provider: ethers.providers.Provider,
   gasAsset: number,
 ): Promise<ReanchorSide> {
-  const assetId = await assetIdOf(api, token);
-  const ed = assetId !== null ? await existentialDeposit(api, assetId) : null;
+  // a missing id or ED costs this side its top-ups, never the keeper's startup
+  const assetId = await assetIdOf(api, token).catch(() => null);
+  const ed = assetId !== null ? await existentialDeposit(api, assetId).catch(() => null) : null;
   const at = new ethers.Contract(token, ATOKEN_ABI, provider);
   const [underlying, pool] = await Promise.all([
     at.UNDERLYING_ASSET_ADDRESS().catch(() => null),
@@ -263,14 +264,14 @@ async function reanchorSide(
   ]);
   let wrap: ReanchorSide['wrap'];
   if (underlying && pool) {
-    const uid = await assetIdOf(api, underlying);
+    const uid = await assetIdOf(api, underlying).catch(() => null);
     wrap = {
       pool,
       underlying: new ethers.Contract(underlying, ERC20_ABI, provider),
-      underlyingEd: uid !== null ? await existentialDeposit(api, uid) : null,
+      underlyingEd: uid !== null ? await existentialDeposit(api, uid).catch(() => null) : null,
     };
   }
-  const gasRoute = assetId !== null && assetId !== gasAsset && (await hasStoredRoute(api, gasAsset, assetId));
+  const gasRoute = assetId !== null && assetId !== gasAsset && (await hasStoredRoute(api, gasAsset, assetId).catch(() => false));
   return { assetId, ed, wrap, gasRoute };
 }
 

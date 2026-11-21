@@ -1,15 +1,20 @@
 import { ApiPromise, HttpProvider, WsProvider } from '@polkadot/api';
 import { ethers } from 'ethers';
 
-// the runtime's own view of the pool tokens: asset ids, existential deposits and
-// stored router routes, and `router.sell` encoded from live metadata
-
 export const DISPATCH_PRECOMPILE = '0x0000000000000000000000000000000000000401';
 const ASSET_PREFIX = '0x0000000000000000000000000000000100000000';
 
 export async function connectSubstrate(rpcUrl: string): Promise<ApiPromise> {
   const provider = rpcUrl.startsWith('ws') ? new WsProvider(rpcUrl) : new HttpProvider(rpcUrl);
   return ApiPromise.create({ provider, noInitWarn: true, throwOnConnect: true });
+}
+
+// http has no runtime-upgrade subscription, so metadata is checked against the chain before encoding
+export async function freshSubstrate(api: ApiPromise, reconnect: () => Promise<ApiPromise>): Promise<ApiPromise> {
+  const live = await api.rpc.state.getRuntimeVersion();
+  if (live.specVersion.eq(api.runtimeVersion.specVersion)) return api;
+  await api.disconnect().catch(() => {});
+  return reconnect();
 }
 
 export function precompileAssetId(address: string): number | null {

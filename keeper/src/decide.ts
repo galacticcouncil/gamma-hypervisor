@@ -228,8 +228,7 @@ export function shouldReanchor(i: ReanchorInput): ReanchorTrigger {
   };
 }
 
-// one tick-spacing of the other token right past spot, on the side the swap crosses:
-// above spot when the price is pushed up in ticks (selling token1), below when down
+// the first full spacing past spot on the side the swap crosses: above it in ticks when selling token1
 export function bridgeRange(spotTick: number, zeroForOne: boolean, tickSpacing: number): [number, number] {
   const floor = Math.floor(spotTick / tickSpacing) * tickSpacing;
   return zeroForOne ? [floor - tickSpacing, floor] : [floor + tickSpacing, floor + 2 * tickSpacing];

@@ -21,6 +21,9 @@ export interface KeeperState {
   foldDwellSince: number;
   reanchorDwellSince: number;
   lastReanchorTs: number;
+  lastReanchorActionTs: number;
+  // position ids of bridges this process laid; the keeper never touches any other position
+  bridgeIds: string[];
   /** Volatility regime, and when it was entered. */
   regime: RegimeState;
   /** Feed price trail, for the "moved X% in Y minutes" checks. */
@@ -39,6 +42,8 @@ export function blankState(): KeeperState {
     foldDwellSince: 0,
     reanchorDwellSince: 0,
     lastReanchorTs: 0,
+    lastReanchorActionTs: 0,
+    bridgeIds: [],
     // Start calm rather than extreme: the first evaluation re-derives it from
     // live inputs anyway, and booting into `extreme` would impose the full
     // re-entry wait on every restart.

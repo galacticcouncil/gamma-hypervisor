@@ -2,9 +2,6 @@ import { ethers } from 'ethers';
 import { AAVE_POOL_SUPPLY_ABI, ERC20_SPEND_ABI } from './abis';
 import { DISPATCH_PRECOMPILE } from './substrate';
 
-// a dust swap with its price limit at the oracle: every unit fills between spot
-// and the oracle. SwapRouter02 and QuoterV2 revert on a swap that crosses no
-// liquidity at all, so a completely empty gap can't be walked this way.
 // frontier returns Error(string) inside the rpc error message, which ethers v5 does not decode
 export function revertReason(e: any): string {
   const raw = JSON.stringify(e?.error ?? e ?? '') + String(e?.message ?? '');
@@ -17,6 +14,24 @@ export function revertReason(e: any): string {
   return e?.reason ?? e?.error?.message ?? e?.message ?? String(e);
 }
 
+// approves `grant` only when the allowance is below `need`
+async function ensureAllowance(
+  signer: ethers.Wallet,
+  token: string,
+  spender: string,
+  need: ethers.BigNumber,
+  grant: ethers.BigNumber,
+  overrides: Record<string, unknown>,
+  confirmations: number,
+): Promise<string | null> {
+  const t = new ethers.Contract(token, ERC20_SPEND_ABI, signer);
+  const allowance: ethers.BigNumber = await t.allowance(signer.address, spender);
+  if (allowance.gte(need)) return null;
+  const a = await t.approve(spender, grant.gt(need) ? grant : need, overrides);
+  await a.wait(confirmations);
+  return a.hash;
+}
+
 export interface ReanchorTx {
   signer: ethers.Wallet;
   router: ethers.Contract;
@@ -24,7 +39,7 @@ export interface ReanchorTx {
   tokenOut: string;
   fee: number;
   amountIn: ethers.BigNumber;
-  /** allowance to grant when short; the router only pulls what the swap consumes */
+  // allowance granted when short; the router only pulls what the swap consumes
   approve: ethers.BigNumber;
   sqrtPriceLimitX96: ethers.BigNumber;
   overrides: Record<string, unknown>;
@@ -33,7 +48,7 @@ export interface ReanchorTx {
 }
 
 export interface ReanchorResult {
-  /** a swap transaction reached the chain, landed or not */
+  // a swap transaction reached the chain, landed or not
   sent: boolean;
   ok: boolean;
   hash: string | null;
@@ -43,14 +58,8 @@ export async function reanchorOnce(i: ReanchorTx): Promise<ReanchorResult> {
   let sent = false;
   let hash: string | null = null;
   try {
-    const token = new ethers.Contract(i.tokenIn, ERC20_SPEND_ABI, i.signer);
-    const allowance: ethers.BigNumber = await token.allowance(i.signer.address, i.router.address);
-    if (allowance.lt(i.amountIn)) {
-      const approve = i.approve.gt(i.amountIn) ? i.approve : i.amountIn;
-      const a = await token.approve(i.router.address, approve, i.overrides);
-      await a.wait(i.confirmations);
-      i.log(`re-anchor: approved ${approve.toString()} for the router — ${a.hash}`);
-    }
+    const a = await ensureAllowance(i.signer, i.tokenIn, i.router.address, i.amountIn, i.approve, i.overrides, i.confirmations);
+    if (a) i.log(`re-anchor: approved ${(i.approve.gt(i.amountIn) ? i.approve : i.amountIn).toString()} for the router — ${a}`);
 
     const params = {
       tokenIn: i.tokenIn,
@@ -77,7 +86,6 @@ export async function reanchorOnce(i: ReanchorTx): Promise<ReanchorResult> {
 
 export interface WrapTx {
   signer: ethers.Wallet;
-  /** the money market pool behind the aToken */
   pool: string;
   underlying: string;
   amount: ethers.BigNumber;
@@ -86,15 +94,9 @@ export interface WrapTx {
   log: (msg: string) => void;
 }
 
-// supply the underlying the keeper already holds, minting the aToken it sells
 export async function wrapOnce(i: WrapTx): Promise<string | null> {
   try {
-    const token = new ethers.Contract(i.underlying, ERC20_SPEND_ABI, i.signer);
-    const allowance: ethers.BigNumber = await token.allowance(i.signer.address, i.pool);
-    if (allowance.lt(i.amount)) {
-      const a = await token.approve(i.pool, i.amount, i.overrides);
-      await a.wait(i.confirmations);
-    }
+    await ensureAllowance(i.signer, i.underlying, i.pool, i.amount, i.amount, i.overrides, i.confirmations);
     const pool = new ethers.Contract(i.pool, AAVE_POOL_SUPPLY_ABI, i.signer);
     await pool.callStatic.supply(i.underlying, i.amount, i.signer.address, 0, i.overrides);
     const tx = await pool.supply(i.underlying, i.amount, i.signer.address, 0, i.overrides);
@@ -109,14 +111,13 @@ export async function wrapOnce(i: WrapTx): Promise<string | null> {
 
 export interface GasBuyTx {
   signer: ethers.Wallet;
-  /** SCALE-encoded router.sell, see substrate.ts */
+  // scale-encoded router.sell
   call: string;
   overrides: Record<string, unknown>;
   confirmations: number;
   log: (msg: string) => void;
 }
 
-// buy with the signer's own gas money through the runtime router, via the dispatch precompile
 export async function buyWithGasOnce(i: GasBuyTx): Promise<string | null> {
   try {
     const req = { to: DISPATCH_PRECOMPILE, data: i.call, ...i.overrides };
@@ -139,26 +140,13 @@ export interface Bridge {
   liquidity: ethers.BigNumber;
 }
 
-// the signer's positions in this pool: only ever bridges the keeper laid itself
-export async function findBridges(
-  npm: ethers.Contract,
-  owner: string,
-  token0: string,
-  token1: string,
-  fee: number,
-): Promise<Bridge[]> {
-  const n: ethers.BigNumber = await npm.balanceOf(owner);
+// only the positions this keeper laid; a burned id drops out
+export async function findBridges(npm: ethers.Contract, ids: string[]): Promise<Bridge[]> {
   const out: Bridge[] = [];
-  for (let i = 0; i < n.toNumber(); i++) {
-    const tokenId: ethers.BigNumber = await npm.tokenOfOwnerByIndex(owner, i);
-    const p = await npm.positions(tokenId);
-    if (
-      String(p.token0).toLowerCase() === token0.toLowerCase() &&
-      String(p.token1).toLowerCase() === token1.toLowerCase() &&
-      Number(p.fee) === fee
-    ) {
-      out.push({ tokenId, tickLower: Number(p.tickLower), tickUpper: Number(p.tickUpper), liquidity: p.liquidity });
-    }
+  for (const id of ids) {
+    const p = await npm.positions(id).catch(() => null);
+    if (!p) continue;
+    out.push({ tokenId: ethers.BigNumber.from(id), tickLower: Number(p.tickLower), tickUpper: Number(p.tickUpper), liquidity: p.liquidity });
   }
   return out;
 }
@@ -179,16 +167,10 @@ export interface MintBridgeTx {
   log: (msg: string) => void;
 }
 
-export async function mintBridgeOnce(i: MintBridgeTx): Promise<string | null> {
+export async function mintBridgeOnce(i: MintBridgeTx): Promise<{ hash: string; tokenId: string } | null> {
   try {
     for (const [token, amount] of [[i.token0, i.amount0], [i.token1, i.amount1]] as const) {
-      if (amount.isZero()) continue;
-      const t = new ethers.Contract(token, ERC20_SPEND_ABI, i.signer);
-      const allowance: ethers.BigNumber = await t.allowance(i.signer.address, i.npm.address);
-      if (allowance.lt(amount)) {
-        const a = await t.approve(i.npm.address, amount, i.overrides);
-        await a.wait(i.confirmations);
-      }
+      if (!amount.isZero()) await ensureAllowance(i.signer, token, i.npm.address, amount, amount, i.overrides, i.confirmations);
     }
     const params = {
       token0: i.token0,
@@ -205,9 +187,18 @@ export async function mintBridgeOnce(i: MintBridgeTx): Promise<string | null> {
     };
     await i.npm.callStatic.mint(params, i.overrides);
     const tx = await i.npm.mint(params, i.overrides);
-    await tx.wait(i.confirmations);
-    i.log(`re-anchor: laid a bridge [${i.tickLower}, ${i.tickUpper}] — ${tx.hash}`);
-    return tx.hash;
+    const r = await tx.wait(i.confirmations);
+    let tokenId: string | null = null;
+    for (const l of r.logs ?? []) {
+      if (String(l.address).toLowerCase() !== i.npm.address.toLowerCase()) continue;
+      try {
+        const ev = i.npm.interface.parseLog(l);
+        if (ev.name === 'Transfer' && String(ev.args.to).toLowerCase() === i.signer.address.toLowerCase()) tokenId = ev.args.tokenId.toString();
+      } catch {}
+    }
+    if (!tokenId) throw new Error(`minted in ${tx.hash} but no position id in the receipt`);
+    i.log(`re-anchor: laid bridge #${tokenId} [${i.tickLower}, ${i.tickUpper}] — ${tx.hash}`);
+    return { hash: tx.hash, tokenId };
   } catch (e: any) {
     i.log(`re-anchor: bridge failed — ${revertReason(e)}`);
     return null;
@@ -216,7 +207,7 @@ export async function mintBridgeOnce(i: MintBridgeTx): Promise<string | null> {
 
 const MAX128 = ethers.BigNumber.from(2).pow(128).sub(1);
 
-// withdraw, collect and burn, one multicall per bridge
+// withdraw, collect and burn, one multicall per bridge; the ids that went
 export async function clearBridgesOnce(i: {
   signer: ethers.Wallet;
   npm: ethers.Contract;
@@ -225,8 +216,8 @@ export async function clearBridgesOnce(i: {
   overrides: Record<string, unknown>;
   confirmations: number;
   log: (msg: string) => void;
-}): Promise<number> {
-  let cleared = 0;
+}): Promise<string[]> {
+  const cleared: string[] = [];
   for (const b of i.bridges) {
     try {
       const calls: string[] = [];
@@ -247,7 +238,7 @@ export async function clearBridgesOnce(i: {
       const tx = await i.npm.multicall(calls, i.overrides);
       await tx.wait(i.confirmations);
       i.log(`re-anchor: cleared bridge #${b.tokenId.toString()} — ${tx.hash}`);
-      cleared++;
+      cleared.push(b.tokenId.toString());
     } catch (e: any) {
       i.log(`re-anchor: clearing bridge #${b.tokenId.toString()} failed — ${revertReason(e)}`);
     }

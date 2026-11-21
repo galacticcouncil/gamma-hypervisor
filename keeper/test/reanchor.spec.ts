@@ -5,7 +5,7 @@ import { bridgeAmount, bridgeRange, shouldReanchor } from '../src/decide';
 import { runReanchor } from '../src/keeper';
 import { priceFromSqrtX96, sqrtPriceFromTick, sqrtX96FromPrice, tickFromPrice } from '../src/price';
 import { blankState } from '../src/state';
-import { precompileAssetId } from '../src/substrate';
+import { freshSubstrate, precompileAssetId } from '../src/substrate';
 import type { VaultCtx } from '../src/chain';
 import { buyWithGasOnce, clearBridgesOnce, findBridges, mintBridgeOnce, reanchorOnce, wrapOnce } from '../src/reanchor';
 
@@ -14,8 +14,8 @@ vi.mock('../src/reanchor', () => ({
   wrapOnce: vi.fn(async () => '0x' + 'cd'.repeat(32)),
   buyWithGasOnce: vi.fn(async () => '0x' + 'ef'.repeat(32)),
   findBridges: vi.fn(async () => []),
-  mintBridgeOnce: vi.fn(async () => '0x' + '12'.repeat(32)),
-  clearBridgesOnce: vi.fn(async (i: any) => i.bridges.length),
+  mintBridgeOnce: vi.fn(async () => ({ hash: '0x' + '12'.repeat(32), tokenId: '3' })),
+  clearBridgesOnce: vi.fn(async (i: any) => i.bridges.map((b: any) => b.tokenId.toString())),
   revertReason: (e: any) => String(e?.message ?? e),
 }));
 
@@ -158,15 +158,17 @@ describe('runReanchor', () => {
     held1?: ethers.BigNumber[];
     underlying?: ethers.BigNumber;
     gas?: ethers.BigNumber;
-    reach?: boolean | 'revert';
+    reach?: boolean | 'revert' | 'rpcfail';
     held0?: ethers.BigNumber;
+    activeLiquidity?: ethers.BigNumber;
     dwellSecs?: number;
   } = {}) {
     if (o.dryRun) process.env.DRY_RUN = 'true';
     const cfg = loadConfig();
     const lines: string[] = [];
     const quote = vi.fn(async (p: any) => {
-      if (o.reach === 'revert') throw new Error('Unexpected error');
+      if (o.reach === 'revert') throw Object.assign(new Error('call revert exception'), { code: 'CALL_EXCEPTION' });
+      if (o.reach === 'rpcfail') throw Object.assign(new Error('timeout'), { code: 'TIMEOUT' });
       return {
         amountOut: BN('1612571438082522'),
         sqrtPriceX96After: o.reach === false ? BN(p.sqrtPriceLimitX96).sub(1_000_000_000) : BN(p.sqrtPriceLimitX96),
@@ -182,7 +184,11 @@ describe('runReanchor', () => {
         cfg,
         provider: { getBalance: async () => o.gas ?? BN('10000000000000000'), send: async () => '0x1' },
         signer: { address: SIGNER },
-        substrate: { tx: { router: { sell } } },
+        substrate: {
+          tx: { router: { sell } },
+          rpc: { state: { getRuntimeVersion: async () => ({ specVersion: { eq: () => true } }) } },
+          runtimeVersion: { specVersion: 1 },
+        },
       },
       oracle: {
         feed0: {
@@ -209,7 +215,7 @@ describe('runReanchor', () => {
           },
         ],
       },
-      pool: { slot0: async () => ({ sqrtPriceX96: BN(1), tick: -109849 }) },
+      pool: { slot0: async () => ({ sqrtPriceX96: BN(1), tick: -109849 }), liquidity: async () => o.activeLiquidity ?? BN(0) },
       token0: { address: HOLLAR, balanceOf: async () => o.held0 ?? BN(0) },
       token1: { address: ATBTC, balanceOf: async () => (held1.length > 1 ? held1.shift()! : held1[0]) },
       symbol0: 'HOLLAR',
@@ -259,6 +265,7 @@ describe('runReanchor', () => {
   it('does not lay a second bridge on the path', async () => {
     vi.mocked(findBridges).mockResolvedValueOnce([{ tokenId: BN(7), tickLower: -110280, tickUpper: -110220, liquidity: BN(5) }]);
     const h = harness({ reach: 'revert', held0: BN('1000000000000000000') });
+    h.ctx.state.bridgeIds = ['7'];
     expect(await runReanchor(h.ctx, SPOT, NOW)).toBe(false);
     expect(mintBridgeOnce).not.toHaveBeenCalled();
     expect(clearBridgesOnce).not.toHaveBeenCalled();
@@ -268,15 +275,65 @@ describe('runReanchor', () => {
   it('clears a stale bridge off the path before laying a new one', async () => {
     vi.mocked(findBridges).mockResolvedValueOnce([{ tokenId: BN(7), tickLower: -110400, tickUpper: -110340, liquidity: BN(5) }]);
     const h = harness({ reach: 'revert', held0: BN('1000000000000000000') });
+    h.ctx.state.bridgeIds = ['7'];
     expect(await runReanchor(h.ctx, SPOT, NOW)).toBe(false);
     expect(vi.mocked(clearBridgesOnce).mock.calls[0][0].bridges.map((b: any) => b.tokenId.toNumber())).toEqual([7]);
     expect(mintBridgeOnce).not.toHaveBeenCalled();
+    expect(h.ctx.state.bridgeIds).toEqual([]);
+  });
+
+  it('only ever looks at bridges it laid itself', async () => {
+    const h = harness({ reach: 'revert', held0: BN('1000000000000000000') });
+    await runReanchor(h.ctx, SPOT, NOW);
+    expect(vi.mocked(findBridges).mock.calls[0][1]).toEqual([]);
+    expect(h.ctx.state.bridgeIds).toEqual(['3']);
+  });
+
+  it('retries an rpc failure instead of bridging it', async () => {
+    const h = harness({ reach: 'rpcfail', held0: BN('1000000000000000000') });
+    expect(await runReanchor(h.ctx, SPOT, NOW)).toBe(false);
+    expect(mintBridgeOnce).not.toHaveBeenCalled();
+    expect(buyWithGasOnce).not.toHaveBeenCalled();
+    expect(h.lines.some((l) => l.includes('quote failed, retrying next block'))).toBe(true);
+  });
+
+  it('does not call a revert with liquidity at spot an empty gap', async () => {
+    const h = harness({ reach: 'revert', held0: BN('1000000000000000000'), activeLiquidity: BN(5) });
+    expect(await runReanchor(h.ctx, SPOT, NOW)).toBe(false);
+    expect(mintBridgeOnce).not.toHaveBeenCalled();
+  });
+
+  it('spaces spend actions by REANCHOR_ACTION_INTERVAL_SECS', async () => {
+    const h = harness({ reach: 'revert', held0: BN('1000000000000000000') });
+    h.ctx.state.lastReanchorActionTs = NOW - 30;
+    expect(await runReanchor(h.ctx, SPOT, NOW)).toBe(false);
+    expect(mintBridgeOnce).not.toHaveBeenCalled();
+    expect(h.lines.some((l) => l === 're-anchor: next action in 90s')).toBe(true);
+  });
+
+  it('caps gas buys per day across the signer', async () => {
+    const h = harness({ reach: 'revert' });
+    (h.ctx.chain as any).gasBuys = Array.from({ length: 6 }, (_, i) => NOW - 1000 + i);
+    expect(await runReanchor(h.ctx, SPOT, NOW)).toBe(false);
+    expect(buyWithGasOnce).not.toHaveBeenCalled();
+    expect(h.lines.some((l) => l.includes('gas buys in 24h'))).toBe(true);
+  });
+
+  it('takes a leftover bridge back once nothing needs it', async () => {
+    const left = { tokenId: BN(5), tickLower: -110280, tickUpper: -110220, liquidity: BN(5) };
+    vi.mocked(findBridges).mockResolvedValueOnce([left]);
+    const h = harness({ dryRun: false });
+    h.ctx.state.bridgeIds = ['5'];
+    expect(await runReanchor(h.ctx, ORACLE_TICK - 150, NOW)).toBe(false);
+    expect(vi.mocked(clearBridgesOnce).mock.calls[0][0].bridges).toEqual([left]);
+    expect(h.ctx.state.bridgeIds).toEqual([]);
   });
 
   it('clears its bridges after the swap lands', async () => {
     const bridge = { tokenId: BN(9), tickLower: -109740, tickUpper: -109680, liquidity: BN(0) };
     vi.mocked(findBridges).mockResolvedValueOnce([bridge]);
     const h = harness();
+    h.ctx.state.bridgeIds = ['9'];
     expect(await runReanchor(h.ctx, SPOT, NOW)).toBe(true);
     expect(vi.mocked(clearBridgesOnce).mock.calls[0][0].bridges).toEqual([bridge]);
   });
@@ -448,6 +505,28 @@ describe('bridge geometry', () => {
     const p = 1 / 58000; // token1 per token0
     expect(Number(bridgeAmount(10_000_000_000_000n, p, false))).toBeCloseTo((1e13 * 58000) / 20, -6);
     expect(Number(bridgeAmount(1_000_000_000_000_000_000n, p, true))).toBeCloseTo((1e18 / 58000) / 20, -2);
+  });
+});
+
+describe('freshSubstrate', () => {
+  const api = (same: boolean) => ({
+    rpc: { state: { getRuntimeVersion: async () => ({ specVersion: { eq: () => same } }) } },
+    runtimeVersion: { specVersion: 1 },
+    disconnect: vi.fn(async () => {}),
+  });
+
+  it('keeps the api while the runtime is unchanged', async () => {
+    const a = api(true);
+    const reconnect = vi.fn();
+    expect(await freshSubstrate(a as any, reconnect)).toBe(a);
+    expect(reconnect).not.toHaveBeenCalled();
+  });
+
+  it('reconnects after a runtime upgrade, so calls are encoded against the new metadata', async () => {
+    const a = api(false);
+    const b = api(true);
+    expect(await freshSubstrate(a as any, async () => b as any)).toBe(b);
+    expect(a.disconnect).toHaveBeenCalled();
   });
 });
 

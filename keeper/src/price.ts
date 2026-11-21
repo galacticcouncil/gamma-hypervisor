@@ -24,7 +24,6 @@ export function tickFromPrice(priceRaw: number): number {
   return Math.round(Math.log(priceRaw) / LOG_1_0001);
 }
 
-/** uint160 sqrtPriceX96 for a raw price, e.g. a swap's price limit. */
 export function sqrtX96FromPrice(priceRaw: number): ethers.BigNumber {
   return bnFloor(Math.sqrt(priceRaw) * Q96);
 }

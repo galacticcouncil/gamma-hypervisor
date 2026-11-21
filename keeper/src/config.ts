@@ -183,6 +183,8 @@ const Env = z
     // a wider gap is a broken feed or a crash, not a stale pool
     REANCHOR_MAX_TICKS: z.coerce.number().int().positive().default(1500),
     REANCHOR_MIN_INTERVAL_SECS: z.coerce.number().int().nonnegative().default(3600),
+    // between top-ups, bridge mints and clears, so nothing can make the keeper spend every block
+    REANCHOR_ACTION_INTERVAL_SECS: z.coerce.number().int().nonnegative().default(120),
     // hydration mainnet SwapRouter02 / QuoterV2 / NonfungiblePositionManager; checked against the pool's factory at startup
     SWAP_ROUTER: addr.default('0x5a79dE848626994c4099640EF5c48Fd65DAe4159'),
     QUOTER: addr.default('0x9D7c18Be9AdD2748784A3c6F9071D67CA8f29974'),
@@ -191,6 +193,7 @@ const Env = z
     // gas money (raw) through the runtime router; 0 = never
     REANCHOR_GAS_BUY_IN: z.string().regex(/^\d+$/).default('100000000000000'),
     REANCHOR_GAS_ASSET: z.coerce.number().int().nonnegative().default(20),
+    REANCHOR_GAS_BUYS_PER_DAY: z.coerce.number().int().nonnegative().default(6),
 
     GAS_FLOOR_WEI: z.string().regex(/^\d+$/).default('0'),
     GAS_LIMIT: z.coerce.number().int().positive().default(3_000_000),
@@ -334,6 +337,7 @@ export const GLOBAL_KEYS = [
   'POSITION_MANAGER',
   'REANCHOR_GAS_BUY_IN',
   'REANCHOR_GAS_ASSET',
+  'REANCHOR_GAS_BUYS_PER_DAY',
   'STATUS_PORT',
   'STATUS_HOST',
   'STATUS_RING',
@@ -394,6 +398,7 @@ export const VAULT_KEYS = [
   'REANCHOR_MAX_IN1',
   'REANCHOR_MAX_TICKS',
   'REANCHOR_MIN_INTERVAL_SECS',
+  'REANCHOR_ACTION_INTERVAL_SECS',
   'LABEL',
 ] as const;
 

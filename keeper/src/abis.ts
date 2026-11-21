@@ -22,6 +22,7 @@ export const POOL_ABI = [
   'function tickSpacing() view returns (int24)',
   'function fee() view returns (uint24)',
   'function factory() view returns (address)',
+  'function liquidity() view returns (uint128)',
   'function observe(uint32[] secondsAgos) view returns (int56[] tickCumulatives, uint160[] secondsPerLiquidityCumulativeX128)',
   'function observations(uint256 index) view returns (uint32 blockTimestamp, int56 tickCumulative, uint160 secondsPerLiquidityCumulativeX128, bool initialized)',
   // Fee accounting: uncollected fees live here, not in the vault's balance.
@@ -118,4 +119,5 @@ export const POSITION_MANAGER_ABI = [
   'function collect((uint256 tokenId, address recipient, uint128 amount0Max, uint128 amount1Max) params) payable returns (uint256 amount0, uint256 amount1)',
   'function burn(uint256 tokenId) payable',
   'function multicall(bytes[] data) payable returns (bytes[] results)',
+  'event Transfer(address indexed from, address indexed to, uint256 indexed tokenId)',
 ];
