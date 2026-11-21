@@ -91,7 +91,7 @@ fire, push the pool price with a large swap, then wait `DWELL_SECS`.
 3. **dwell** — the trigger must hold continuously for `DWELL_SECS`;
 4. **cooldown** — `MIN_INTERVAL_SECS`, and the proxy's on-chain `minInterval`;
 5. **TWAP gate** — window clamped to the pool's actual history; skip if `|spot − TWAP| > MAX_DEV_TICKS`. The TWAP tick becomes the **placement** tick;
-6. **oracle clamp** — skip if the pool disagrees with the price feed by more than `ORACLE_MAX_DEV_TICKS`, or the feed is older than `ORACLE_MAX_AGE_SECS`;
+6. **oracle clamp** — skip if the pool disagrees with the price feed by more than `ORACLE_MAX_DEV_TICKS`, or the feed is older than `ORACLE_MAX_AGE_SECS`; with `REANCHOR_ENABLED`, a gap that has held for the dwell is first swapped closed (see **Re-anchor**);
 7. **gas floor** — skip if the signer's WETH balance is below `GAS_FLOOR_WEI`;
 8. compute the base band around the **placement** tick (`±BASE_HALF_WIDTH_MULT × tickSpacing`), clamped to the proxy's `maxTranslation`; place the limit range one-sided on the surplus token;
 9. derive `inMin`/`outMin` from the current positions and price, less `MINS_TOLERANCE_BPS`;
@@ -131,6 +131,17 @@ fire, push the pool price with a large swap, then wait `DWELL_SECS`.
 | `ORACLE_FEED0` / `ORACLE_FEED1` | — | Chainlink AggregatorV3 **addresses**, one per pair; omit `FEED1` if token1 is the USD side. `FEED0` may instead be the MM's `AaveOracle` (see below) |
 | `ORACLE_MAX_AGE_SECS` | `600` | reject staler feeds |
 | `ORACLE_MAX_DEV_TICKS` | `200` | max pool-vs-oracle deviation (~2%) |
+| **re-anchor** | | |
+| `REANCHOR_ENABLED` | `false` | swap a stranded pool back to the oracle; see below |
+| `REANCHOR_MAX_IN0` / `REANCHOR_MAX_IN1` | `0` | dust budget per swap, raw units of the token sold; `0` never sells that side |
+| `REANCHOR_MAX_TICKS` | `1500` | leave a wider gap to an operator |
+| `REANCHOR_MIN_INTERVAL_SECS` | `3600` | min seconds between re-anchor swaps |
+| `REANCHOR_ACTION_INTERVAL_SECS` | `120` | min seconds between re-anchor spend actions (top-ups, bridge mints and clears) |
+| `SWAP_ROUTER` / `QUOTER` | Hydration mainnet SwapRouter02 `0x5a79…4159` / QuoterV2 `0x9D7c…9974` | process-wide; startup fails if either does not serve the pool's factory, so set both on other chains |
+| `POSITION_MANAGER` | Hydration mainnet NonfungiblePositionManager `0xd502…10B3` | process-wide; lays the bridge below; checked against the pool's factory like the router |
+| `REANCHOR_GAS_BUY_IN` | `100000000000000` | gas money (raw) to sell for the token when the signer has neither it nor its underlying; `0` = never |
+| `REANCHOR_GAS_ASSET` | `20` | the gas asset (WETH) that buys it |
+| `REANCHOR_GAS_BUYS_PER_DAY` | `6` | cap on gas buys per 24h across every vault on the signer |
 | **operations** | | |
 | `GAS_FLOOR_WEI` | `0` | skip if signer WETH-gas balance below this |
 | `GAS_LIMIT` | `3000000` | rebalance gas limit |
@@ -170,6 +181,56 @@ detected once at startup; anything that is neither a feed nor an `AaveOracle` fa
 The DIA legs run on the same slow cadence as DOT's (GETH/GSOL read 37-50 min old), so
 use the deploy's `ORACLE_MAX_AGE_SECS=28800`; 600s skips nearly every rebalance.
 `npm run smoke` prints the resolved asset, source and age leg.
+
+### Re-anchor (`REANCHOR_ENABLED`)
+
+The oracle clamp assumes arbitrage pulls the pool to the market. It does not when the
+side the price has to cross is empty: a vault that sold all of one token on the way down
+leaves no bid, so nobody earns anything by walking the price through it, spot stays put,
+and the clamp blocks every rebalance, refresh and compound until the market comes back
+on its own. atBTC/HOLLAR sat like that from 18 to 20 Nov 2026, 350-600 ticks off, with
+its whole inventory in a limit order 10-16% above the market.
+
+With re-anchor on, once spot has sat more than `ORACLE_MAX_DEV_TICKS` from a fresh
+oracle for the dwell, the keeper swaps through `SWAP_ROUTER` with the price limit at
+the oracle price, selling at most `REANCHOR_MAX_IN0/1` of the token that pushes spot
+toward it. Every unit fills between spot and the oracle, so the cost is bounded by the
+budget (the vault's own dust plus the pool fee on it). It first quotes the swap and acts
+only if the budget reaches the oracle; if it does not, the gap holds real liquidity and
+arbitrage is paid to close it. After the swap the TWAP gate holds the rebalance until
+the pool's average catches up, then the keeper re-centers as usual.
+
+- it tops itself up when what it holds cannot reach the oracle: an aToken's underlying in the
+  signer is supplied to the money market first, otherwise it buys the token with
+  `REANCHOR_GAS_BUY_IN` of gas money through the runtime router (`router.sell` with an empty
+  route, so the stored route; sent through the dispatch precompile), asking at least the
+  token's ED out and never below `GAS_FLOOR_WEI`. It swaps on the next block. A wrap never
+  leaves an underlying remainder under the ED, which the duster would sweep;
+- an aToken transfer can credit the pool one wei short at a given liquidity index, which the pool
+  rejects as `IIA`. A preflight revert costs nothing and is retried next block; only a swap that
+  reached the chain starts `REANCHOR_MIN_INTERVAL_SECS`;
+- the token a re-anchor buys back (HOLLAR here) arrives in dust amounts under its ED, so the
+  duster sweeps it;
+- SwapRouter02 and QuoterV2 reject a swap that crosses no liquidity at all, which is the normal
+  state of a one-sided vault after a rebalance (only its own token, on the far side of spot). On
+  that revert the keeper lays a **bridge**: one tick-spacing of the other token right past spot
+  through `POSITION_MANAGER`, a twentieth of the swap budget at the oracle (bought with gas money
+  when the signer has none), swaps through it on the next block and burns it afterwards. A gap
+  counts as empty only when the node itself reports a revert (ethers v5 calls every failed
+  `eth_call` a `CALL_EXCEPTION`, timeouts included) and active liquidity at spot is zero; anything
+  else is retried. The full budget is quoted before anything is bought, so a gap with real liquidity
+  never triggers a top-up. The keeper only touches positions it laid itself (ids kept in memory, so a restart
+  between laying and burning leaves an orphan for an operator), never lays a second bridge on the
+  path, clears a stale one first, and takes a leftover back once no re-anchor needs it;
+- spend actions are spaced by `REANCHOR_ACTION_INTERVAL_SECS` and gas buys capped per day, so moving
+  spot around an empty gap cannot make the keeper spend every block; a preflight that fails costs
+  nothing and counts against neither. The oracle is sampled every 30s until the dwell is armed, and
+  the regime is refreshed right before acting. `npm run once` only arms a re-anchor in `DRY_RUN`
+  (bridge ids live in memory, so a live one-shot would leak them);
+- `router.sell` is encoded from the runtime's metadata, which is re-fetched when the runtime
+  version changes (the http provider gets no upgrade subscription);
+- skipped in the `extreme` regime, on a stale or unreadable feed, and past
+  `REANCHOR_MAX_TICKS`.
 
 ### Fold at balance (`FOLD_ENABLED`)
 

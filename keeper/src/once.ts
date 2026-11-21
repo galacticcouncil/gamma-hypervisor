@@ -26,6 +26,8 @@ async function main(): Promise<void> {
   // "held since the epoch", which clears any dwell window.
   ctx.state.dwellSince = 1;
   ctx.state.refreshDwellSince = 1;
+  // a live one-shot would lay bridges it then forgets
+  if (cfg.DRY_RUN) ctx.state.reanchorDwellSince = 1;
 
   const blockNumber = await chain.provider.getBlockNumber();
   const block = await chain.provider.getBlock(blockNumber);

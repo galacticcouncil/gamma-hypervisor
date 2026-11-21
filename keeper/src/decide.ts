@@ -192,6 +192,53 @@ export function shouldFold(i: FoldInput): Trigger {
   };
 }
 
+export interface ReanchorInput {
+  spotTick: number;
+  oracleTick: number;
+  maxDevTicks: number;
+  maxTicks: number;
+}
+
+export interface ReanchorTrigger extends Trigger {
+  // sell token0: push the price (token1 per token0) down to the oracle
+  zeroForOne: boolean;
+  tooFar: boolean;
+}
+
+export function shouldReanchor(i: ReanchorInput): ReanchorTrigger {
+  const gap = i.oracleTick - i.spotTick;
+  const dist = Math.abs(gap);
+  const zeroForOne = gap < 0;
+  if (dist <= i.maxDevTicks) {
+    return { trigger: false, zeroForOne, tooFar: false, reason: `spot ${i.spotTick} within ${dist} ticks of oracle ${i.oracleTick}` };
+  }
+  if (dist > i.maxTicks) {
+    return {
+      trigger: false,
+      zeroForOne,
+      tooFar: true,
+      reason: `spot ${i.spotTick} is ${dist} ticks from oracle ${i.oracleTick}, over REANCHOR_MAX_TICKS ${i.maxTicks} — not chasing it`,
+    };
+  }
+  return {
+    trigger: true,
+    zeroForOne,
+    tooFar: false,
+    reason: `spot ${i.spotTick} is ${dist} ticks from oracle ${i.oracleTick} (> ${i.maxDevTicks})`,
+  };
+}
+
+// the first full spacing past spot on the side the swap crosses: above it in ticks when selling token1
+export function bridgeRange(spotTick: number, zeroForOne: boolean, tickSpacing: number): [number, number] {
+  const floor = Math.floor(spotTick / tickSpacing) * tickSpacing;
+  return zeroForOne ? [floor - tickSpacing, floor] : [floor + tickSpacing, floor + 2 * tickSpacing];
+}
+
+export function bridgeAmount(capSold: bigint, priceRaw: number, zeroForOne: boolean): bigint {
+  const v = zeroForOne ? Number(capSold) * priceRaw : Number(capSold) / priceRaw;
+  return v > 0 && Number.isFinite(v) ? BigInt(Math.floor(v / 20)) : 0n;
+}
+
 /** Trigger predicate plus the band it would place, centered on `placementTick`. */
 export function decide(i: DecideInput): Decision {
   const [newBaseLower, newBaseUpper] = centeredBand(i.placementTick, i.baseHalfWidthMult, i.tickSpacing);
