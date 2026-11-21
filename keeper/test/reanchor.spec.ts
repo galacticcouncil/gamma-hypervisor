@@ -9,15 +9,25 @@ import { freshSubstrate, precompileAssetId } from '../src/substrate';
 import type { VaultCtx } from '../src/chain';
 import { buyWithGasOnce, clearBridgesOnce, findBridges, mintBridgeOnce, reanchorOnce, wrapOnce } from '../src/reanchor';
 
-vi.mock('../src/reanchor', () => ({
+vi.mock('../src/moneyMarket', () => ({ isReservePaused: vi.fn(async () => true) }));
+
+vi.mock('../src/reanchor', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../src/reanchor')>()),
   reanchorOnce: vi.fn(async () => ({ sent: true, ok: true, hash: '0x' + 'ab'.repeat(32) })),
-  wrapOnce: vi.fn(async () => '0x' + 'cd'.repeat(32)),
-  buyWithGasOnce: vi.fn(async () => '0x' + 'ef'.repeat(32)),
+  wrapOnce: vi.fn(async () => ({ sent: true, ok: true })),
+  buyWithGasOnce: vi.fn(async () => ({ sent: true, ok: true })),
   findBridges: vi.fn(async () => []),
-  mintBridgeOnce: vi.fn(async () => ({ hash: '0x' + '12'.repeat(32), tokenId: '3' })),
-  clearBridgesOnce: vi.fn(async (i: any) => i.bridges.map((b: any) => b.tokenId.toString())),
-  revertReason: (e: any) => String(e?.message ?? e),
+  mintBridgeOnce: vi.fn(async () => ({ sent: true, minted: { hash: '0x' + '12'.repeat(32), tokenId: '3' } })),
+  clearBridgesOnce: vi.fn(async (i: any) => ({ sent: true, cleared: i.bridges.map((b: any) => b.tokenId.toString()) })),
 }));
+
+const reverted = (reason: string) =>
+  Object.assign(new Error('missing revert data in call exception'), {
+    code: 'CALL_EXCEPTION',
+    error: { code: 'SERVER_ERROR', error: { code: -32603, message: `VM Exception while processing transaction: revert ${reason}` } },
+  });
+const timedOut = () =>
+  Object.assign(new Error('missing revert data in call exception'), { code: 'CALL_EXCEPTION', error: { code: 'TIMEOUT', message: 'timeout' } });
 
 const KEY = '0x' + '11'.repeat(32);
 const VAULT = '0x' + 'aa'.repeat(20);
@@ -34,7 +44,6 @@ const MM_POOL = '0x' + '04'.repeat(20);
 const BN = ethers.BigNumber.from;
 const NOW = 1_795_000_000;
 const BTC_USD = 58940.89270066;
-// HOLLAR is token0, atBTC token1, the feed prices atBTC: the pool price is 1/usd
 const ORACLE_TICK = tickFromPrice(1 / BTC_USD);
 
 let saved: NodeJS.ProcessEnv;
@@ -157,6 +166,7 @@ describe('runReanchor', () => {
     usd?: number;
     held1?: ethers.BigNumber[];
     underlying?: ethers.BigNumber;
+    underlyingAddr?: string;
     gas?: ethers.BigNumber;
     reach?: boolean | 'revert' | 'rpcfail';
     held0?: ethers.BigNumber;
@@ -167,14 +177,15 @@ describe('runReanchor', () => {
     const cfg = loadConfig();
     const lines: string[] = [];
     const quote = vi.fn(async (p: any) => {
-      if (o.reach === 'revert') throw Object.assign(new Error('call revert exception'), { code: 'CALL_EXCEPTION' });
-      if (o.reach === 'rpcfail') throw Object.assign(new Error('timeout'), { code: 'TIMEOUT' });
+      if (o.reach === 'revert') throw reverted('Unexpected error');
+      if (o.reach === 'rpcfail') throw timedOut();
       return {
         amountOut: BN('1612571438082522'),
         sqrtPriceX96After: o.reach === false ? BN(p.sqrtPriceLimitX96).sub(1_000_000_000) : BN(p.sqrtPriceLimitX96),
       };
     });
     const sell = vi.fn((..._args: unknown[]) => ({ method: { toHex: () => '0xd15a' } }));
+    const feedRead = vi.fn();
     // successive balanceOf reads walk the list, the last value sticks
     const held1 = [...(o.held1 ?? [BN('20000000000000')])];
     const usd = o.usd ?? BTC_USD;
@@ -194,10 +205,10 @@ describe('runReanchor', () => {
         feed0: {
           address: FEED,
           decimals: async () => 8,
-          latestRoundData: async () => ({
+          latestRoundData: feedRead.mockImplementation(async () => ({
             answer: BN(Math.round(usd * 1e8)),
             updatedAt: BN(NOW - (o.feedAgeSecs ?? 60)),
-          }),
+          })),
         },
       },
       reanchor: {
@@ -206,12 +217,14 @@ describe('runReanchor', () => {
         npm: { address: '0x' + '05'.repeat(20) },
         fee: 3000,
         sides: [
-          { assetId: 222, ed: BN('20000000000000000'), gasRoute: true },
+          { assetId: 222, ed: BN('20000000000000000'), gasRoute: true, unresolved: false, resolvedAt: NOW },
           {
             assetId: 1006,
             ed: BN('208779411374'),
-            wrap: { pool: MM_POOL, underlying: { address: TBTC, balanceOf: async () => o.underlying ?? BN(0) }, underlyingEd: TBTC_ED },
+            wrap: { pool: MM_POOL, underlying: { address: o.underlyingAddr ?? TBTC, balanceOf: async () => o.underlying ?? BN(0) }, underlyingEd: TBTC_ED },
             gasRoute: true,
+            unresolved: false,
+            resolvedAt: NOW,
           },
         ],
       },
@@ -227,7 +240,7 @@ describe('runReanchor', () => {
       state: blankState(),
       log: (m: string) => lines.push(m.trim()),
     } as unknown as VaultCtx;
-    return { ctx, lines, quote, sell };
+    return { ctx, lines, quote, sell, feedRead };
   }
 
   const SPOT = -110298;
@@ -241,13 +254,11 @@ describe('runReanchor', () => {
     vi.mocked(clearBridgesOnce).mockClear();
   });
 
-  // the vault holds only atBTC asks: nothing between spot and the oracle for the router to cross
   it('lays a dust HOLLAR bridge one spacing past spot when the gap is empty, then swaps next block', async () => {
     const h = harness({ reach: 'revert', held0: BN('1000000000000000000') });
-    expect(await runReanchor(h.ctx, SPOT, NOW)).toBe(false);
+    expect(await runReanchor(h.ctx, SPOT, NOW)).toBe(true);
     const m = vi.mocked(mintBridgeOnce).mock.calls[0][0];
     expect([m.tickLower, m.tickUpper]).toEqual([-110280, -110220]);
-    // a twentieth of the 1e13 atBTC budget, in HOLLAR at the oracle
     expect(Number(m.amount0.toString())).toBeCloseTo((1e13 * BTC_USD) / 20, -6);
     expect(m.amount1.isZero()).toBe(true);
     expect(reanchorOnce).not.toHaveBeenCalled();
@@ -256,7 +267,7 @@ describe('runReanchor', () => {
 
   it('buys HOLLAR with gas money for the bridge when it has none', async () => {
     const h = harness({ reach: 'revert' });
-    expect(await runReanchor(h.ctx, SPOT, NOW)).toBe(false);
+    expect(await runReanchor(h.ctx, SPOT, NOW)).toBe(true);
     expect(mintBridgeOnce).not.toHaveBeenCalled();
     expect(h.sell).toHaveBeenCalledWith(20, 222, '100000000000000', '20000000000000000', []);
     expect(h.lines.some((l) => l.includes('topped up HOLLAR for a bridge'))).toBe(true);
@@ -276,7 +287,7 @@ describe('runReanchor', () => {
     vi.mocked(findBridges).mockResolvedValueOnce([{ tokenId: BN(7), tickLower: -110400, tickUpper: -110340, liquidity: BN(5) }]);
     const h = harness({ reach: 'revert', held0: BN('1000000000000000000') });
     h.ctx.state.bridgeIds = ['7'];
-    expect(await runReanchor(h.ctx, SPOT, NOW)).toBe(false);
+    expect(await runReanchor(h.ctx, SPOT, NOW)).toBe(true);
     expect(vi.mocked(clearBridgesOnce).mock.calls[0][0].bridges.map((b: any) => b.tokenId.toNumber())).toEqual([7]);
     expect(mintBridgeOnce).not.toHaveBeenCalled();
     expect(h.ctx.state.bridgeIds).toEqual([]);
@@ -319,12 +330,53 @@ describe('runReanchor', () => {
     expect(h.lines.some((l) => l.includes('gas buys in 24h'))).toBe(true);
   });
 
+  it('buys with gas money in the same block when the supply fails its preflight', async () => {
+    vi.mocked(wrapOnce).mockResolvedValueOnce({ sent: false, ok: false });
+    const h = harness({ held1: [BN(0)], underlying: BN('103650801406404') });
+    expect(await runReanchor(h.ctx, SPOT, NOW)).toBe(true);
+    expect(wrapOnce).toHaveBeenCalledTimes(1);
+    expect(buyWithGasOnce).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not count a gas buy that failed its preflight', async () => {
+    vi.mocked(buyWithGasOnce).mockResolvedValueOnce({ sent: false, ok: false });
+    const h = harness({ held1: [BN(0)] });
+    expect(await runReanchor(h.ctx, SPOT, NOW)).toBe(false);
+    expect((h.ctx.chain as any).gasBuys).toEqual([]);
+    expect(h.ctx.state.lastReanchorActionTs).toBe(0);
+  });
+
+  it('buys nothing when even the full budget falls short of the oracle', async () => {
+    const h = harness({ reach: false, held1: [BN(0)], underlying: BN('103650801406404') });
+    expect(await runReanchor(h.ctx, SPOT, NOW)).toBe(false);
+    expect(wrapOnce).not.toHaveBeenCalled();
+    expect(buyWithGasOnce).not.toHaveBeenCalled();
+    expect(h.lines.some((l) => l.includes('leaving it to arbitrage'))).toBe(true);
+  });
+
+  it('never wraps gas money below the floor', async () => {
+    process.env.GAS_FLOOR_WEI = '1000000000000000';
+    const weth = '0x0000000000000000000000000000000100000014';
+    const h = harness({ held1: [BN(0)], underlying: BN('1005000000000000'), underlyingAddr: weth });
+    await runReanchor(h.ctx, SPOT, NOW);
+    expect(vi.mocked(wrapOnce).mock.calls[0][0].amount.toString()).toBe('5000000000000');
+  });
+
+  it('samples the oracle every 30s until the dwell is armed', async () => {
+    const h = harness({ dryRun: true, dwellSecs: 600 });
+    await runReanchor(h.ctx, SPOT, NOW);
+    await runReanchor(h.ctx, SPOT, NOW + 10);
+    expect(h.feedRead).toHaveBeenCalledTimes(1);
+    await runReanchor(h.ctx, SPOT, NOW + 31);
+    expect(h.feedRead).toHaveBeenCalledTimes(2);
+  });
+
   it('takes a leftover bridge back once nothing needs it', async () => {
     const left = { tokenId: BN(5), tickLower: -110280, tickUpper: -110220, liquidity: BN(5) };
     vi.mocked(findBridges).mockResolvedValueOnce([left]);
     const h = harness({ dryRun: false });
     h.ctx.state.bridgeIds = ['5'];
-    expect(await runReanchor(h.ctx, ORACLE_TICK - 150, NOW)).toBe(false);
+    expect(await runReanchor(h.ctx, ORACLE_TICK - 150, NOW)).toBe(true);
     expect(vi.mocked(clearBridgesOnce).mock.calls[0][0].bridges).toEqual([left]);
     expect(h.ctx.state.bridgeIds).toEqual([]);
   });
@@ -394,7 +446,7 @@ describe('runReanchor', () => {
 
   it('supplies the underlying it holds, then sells the aToken on the next block', async () => {
     const h = harness({ held1: [BN(0), CAP], underlying: BN('103650801406404') });
-    expect(await runReanchor(h.ctx, SPOT, NOW)).toBe(false);
+    expect(await runReanchor(h.ctx, SPOT, NOW)).toBe(true);
     const w = vi.mocked(wrapOnce).mock.calls[0][0];
     expect(w.underlying).toBe(TBTC);
     expect(w.pool).toBe(MM_POOL);
@@ -416,7 +468,7 @@ describe('runReanchor', () => {
 
   it('buys with gas money when there is nothing to supply, asking at least the ED', async () => {
     const h = harness({ held1: [BN(0), BN('3000000000000')] });
-    expect(await runReanchor(h.ctx, SPOT, NOW)).toBe(false);
+    expect(await runReanchor(h.ctx, SPOT, NOW)).toBe(true);
     expect(wrapOnce).not.toHaveBeenCalled();
     expect(h.sell).toHaveBeenCalledWith(20, 1006, '100000000000000', '208779411374', []);
     expect(vi.mocked(buyWithGasOnce).mock.calls[0][0].call).toBe('0xd15a');
@@ -430,7 +482,7 @@ describe('runReanchor', () => {
     expect(await runReanchor(h.ctx, SPOT, NOW)).toBe(false);
     expect(h.ctx.state.lastReanchorTs).toBe(0);
     vi.mocked(reanchorOnce).mockResolvedValueOnce({ sent: true, ok: false, hash: '0x01' });
-    expect(await runReanchor(h.ctx, SPOT, NOW + 2)).toBe(false);
+    expect(await runReanchor(h.ctx, SPOT, NOW + 2)).toBe(true);
     expect(h.ctx.state.lastReanchorTs).toBe(NOW + 2);
   });
 
@@ -448,7 +500,13 @@ describe('runReanchor', () => {
     const h = harness({ held1: [BN(0)] });
     expect(await runReanchor(h.ctx, SPOT, NOW)).toBe(false);
     expect(buyWithGasOnce).not.toHaveBeenCalled();
-    expect(h.quote).not.toHaveBeenCalled();
+  });
+
+  it('asks for funding when it holds none and cannot get any', async () => {
+    process.env.REANCHOR_GAS_BUY_IN = '0';
+    const h = harness({ held1: [BN(0)] });
+    expect(await runReanchor(h.ctx, SPOT, NOW)).toBe(false);
+    expect(h.lines.some((l) => l.includes('holds no atBTC and could not get any'))).toBe(true);
   });
 
   it('only plans the top-up in DRY_RUN', async () => {
@@ -485,10 +543,11 @@ describe('runReanchor', () => {
     expect(cooled.quote).not.toHaveBeenCalled();
     expect(cooled.lines.some((l) => l.startsWith('re-anchor: min interval'))).toBe(true);
 
+    Object.assign(process.env, { REGIME_ENABLED: 'true', MM_DATA_PROVIDER: '0x' + '06'.repeat(20), MM_UNDERLYING: TBTC });
     const extreme = harness({ dryRun: true });
-    extreme.ctx.state.regime = { regime: 'extreme', since: NOW - 60 };
     expect(await runReanchor(extreme.ctx, SPOT, NOW)).toBe(false);
     expect(extreme.quote).not.toHaveBeenCalled();
+    expect(extreme.lines.some((l) => l.includes('regime EXTREME'))).toBe(true);
   });
 });
 
@@ -496,7 +555,6 @@ describe('bridge geometry', () => {
   it('sits one full spacing past spot on the side the swap crosses', () => {
     expect(bridgeRange(-109797, false, 60)).toEqual([-109740, -109680]);
     expect(bridgeRange(-109797, true, 60)).toEqual([-109860, -109800]);
-    // exactly on a multiple: the down-side bridge may end at spot (token1-only), the up-side starts past it
     expect(bridgeRange(-109800, true, 60)).toEqual([-109860, -109800]);
     expect(bridgeRange(-109800, false, 60)).toEqual([-109740, -109680]);
   });
@@ -505,6 +563,33 @@ describe('bridge geometry', () => {
     const p = 1 / 58000; // token1 per token0
     expect(Number(bridgeAmount(10_000_000_000_000n, p, false))).toBeCloseTo((1e13 * 58000) / 20, -6);
     expect(Number(bridgeAmount(1_000_000_000_000_000_000n, p, true))).toBeCloseTo((1e18 / 58000) / 20, -2);
+  });
+});
+
+describe('revert classification', () => {
+  it('tells a node revert from an rpc failure that ethers also calls CALL_EXCEPTION', async () => {
+    const real = await vi.importActual<typeof import('../src/reanchor')>('../src/reanchor');
+    expect(real.isRevert(reverted('Unexpected error'))).toBe(true);
+    expect(real.isRevert(timedOut())).toBe(false);
+    expect(real.isRevert(Object.assign(new Error('could not detect network'), { code: 'NETWORK_ERROR' }))).toBe(false);
+    const noCode = Object.assign(new Error('missing revert data in call exception'), {
+      code: 'CALL_EXCEPTION',
+      error: { code: 'SERVER_ERROR', error: { message: 'execution reverted: 0x' } },
+    });
+    expect(real.isRevert(noCode)).toBe(true);
+    expect(real.revertReason(reverted('Invalid token ID'))).toBe('Invalid token ID');
+  });
+
+  it('drops a burned bridge but never forgets one over an rpc failure', async () => {
+    const real = await vi.importActual<typeof import('../src/reanchor')>('../src/reanchor');
+    const npm = (err: any) => ({
+      positions: async (id: string) => {
+        if (id === '1') throw err;
+        return { tickLower: -60, tickUpper: 0, liquidity: BN(5) };
+      },
+    });
+    expect((await real.findBridges(npm(reverted('Invalid token ID')) as any, ['1', '2'])).map((b) => b.tokenId.toString())).toEqual(['2']);
+    await expect(real.findBridges(npm(timedOut()) as any, ['1', '2'])).rejects.toThrow();
   });
 });
 
@@ -527,6 +612,12 @@ describe('freshSubstrate', () => {
     const b = api(true);
     expect(await freshSubstrate(a as any, async () => b as any)).toBe(b);
     expect(a.disconnect).toHaveBeenCalled();
+  });
+
+  it('keeps the old api if the reconnect fails', async () => {
+    const a = api(false);
+    await expect(freshSubstrate(a as any, async () => { throw new Error('down'); })).rejects.toThrow('down');
+    expect(a.disconnect).not.toHaveBeenCalled();
   });
 });
 

@@ -95,7 +95,8 @@ function vaultBanner(ctx: VaultCtx, blockTimeSecs: number): void {
       ctx.log(
         `    ${sym}: asset ${s.assetId ?? '?'}, ED ${s.ed?.toString() ?? '?'}` +
           `${s.wrap ? `, wraps ${s.wrap.underlying.address}` : ''}` +
-          `${s.gasRoute ? `, gas route from asset ${cfg.REANCHOR_GAS_ASSET}` : ', no gas route'}`,
+          `${s.gasRoute ? `, gas route from asset ${cfg.REANCHOR_GAS_ASSET}` : ', no gas route'}` +
+          `${s.unresolved ? ' (a lookup failed, retried hourly)' : ''}`,
       );
     });
   }

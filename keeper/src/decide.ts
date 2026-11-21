@@ -234,7 +234,6 @@ export function bridgeRange(spotTick: number, zeroForOne: boolean, tickSpacing: 
   return zeroForOne ? [floor - tickSpacing, floor] : [floor + tickSpacing, floor + 2 * tickSpacing];
 }
 
-// a twentieth of the swap budget, valued at the oracle, in the token the bridge holds
 export function bridgeAmount(capSold: bigint, priceRaw: number, zeroForOne: boolean): bigint {
   const v = zeroForOne ? Number(capSold) * priceRaw : Number(capSold) / priceRaw;
   return v > 0 && Number.isFinite(v) ? BigInt(Math.floor(v / 20)) : 0n;

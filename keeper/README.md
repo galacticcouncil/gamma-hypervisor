@@ -216,12 +216,17 @@ the pool's average catches up, then the keeper re-centers as usual.
   that revert the keeper lays a **bridge**: one tick-spacing of the other token right past spot
   through `POSITION_MANAGER`, a twentieth of the swap budget at the oracle (bought with gas money
   when the signer has none), swaps through it on the next block and burns it afterwards. A gap
-  counts as empty only on a contract revert with zero active liquidity at spot; an rpc failure is
-  retried. The keeper only touches positions it laid itself (ids kept in memory, so a restart
+  counts as empty only when the node itself reports a revert (ethers v5 calls every failed
+  `eth_call` a `CALL_EXCEPTION`, timeouts included) and active liquidity at spot is zero; anything
+  else is retried. The full budget is quoted before anything is bought, so a gap with real liquidity
+  never triggers a top-up. The keeper only touches positions it laid itself (ids kept in memory, so a restart
   between laying and burning leaves an orphan for an operator), never lays a second bridge on the
   path, clears a stale one first, and takes a leftover back once no re-anchor needs it;
 - spend actions are spaced by `REANCHOR_ACTION_INTERVAL_SECS` and gas buys capped per day, so moving
-  spot around an empty gap cannot make the keeper spend every block;
+  spot around an empty gap cannot make the keeper spend every block; a preflight that fails costs
+  nothing and counts against neither. The oracle is sampled every 30s until the dwell is armed, and
+  the regime is refreshed right before acting. `npm run once` only arms a re-anchor in `DRY_RUN`
+  (bridge ids live in memory, so a live one-shot would leak them);
 - `router.sell` is encoded from the runtime's metadata, which is re-fetched when the runtime
   version changes (the http provider gets no upgrade subscription);
 - skipped in the `extreme` regime, on a stale or unreadable feed, and past

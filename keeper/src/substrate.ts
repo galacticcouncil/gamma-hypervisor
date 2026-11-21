@@ -13,8 +13,13 @@ export async function connectSubstrate(rpcUrl: string): Promise<ApiPromise> {
 export async function freshSubstrate(api: ApiPromise, reconnect: () => Promise<ApiPromise>): Promise<ApiPromise> {
   const live = await api.rpc.state.getRuntimeVersion();
   if (live.specVersion.eq(api.runtimeVersion.specVersion)) return api;
+  const next = await reconnect();
   await api.disconnect().catch(() => {});
-  return reconnect();
+  return next;
+}
+
+export function assetPrecompile(id: number): string {
+  return ASSET_PREFIX.slice(0, 34) + id.toString(16).padStart(8, '0');
 }
 
 export function precompileAssetId(address: string): number | null {

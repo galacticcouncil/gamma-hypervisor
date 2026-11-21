@@ -9,11 +9,11 @@ import { computeCompoundMins, computeMins, splitForBand } from './mins';
 import { readOracleTick, type OracleReading } from './oracle';
 import { priceFromSqrtX96, sqrtPriceFromTick, sqrtX96FromPrice, tickFromPrice, toFloat } from './price';
 import { preflight, type RebalanceArgs } from './preflight';
-import { txOverrides } from './chain';
+import { resolveReanchorSide, txOverrides } from './chain';
 import { submitRebalance } from './submit';
 import { compoundOnce } from './compound';
-import { buyWithGasOnce, clearBridgesOnce, findBridges, mintBridgeOnce, reanchorOnce, revertReason, wrapOnce, type Bridge } from './reanchor';
-import { connectSubstrate, freshSubstrate, routerSellCall } from './substrate';
+import { buyWithGasOnce, clearBridgesOnce, findBridges, isRevert, mintBridgeOnce, reanchorOnce, revertReason, wrapOnce, type Bridge } from './reanchor';
+import { assetPrecompile, connectSubstrate, freshSubstrate, routerSellCall } from './substrate';
 import { vaultFees } from './feesOwed';
 import { fetchVolBaseline } from './indexer';
 import { isReservePaused } from './moneyMarket';
@@ -376,6 +376,8 @@ async function runCompound(
 type Quote = { amountOut: ethers.BigNumber; sqrtPriceX96After: ethers.BigNumber };
 type Probe = { kind: 'reaches' | 'short'; q: Quote } | { kind: 'empty' } | { kind: 'error'; reason: string };
 
+const REANCHOR_SAMPLE_SECS = 30;
+
 function actionAllowed(ctx: VaultCtx, now: number): boolean {
   const wait = ctx.state.lastReanchorActionTs + ctx.cfg.REANCHOR_ACTION_INTERVAL_SECS - now;
   if (ctx.state.lastReanchorActionTs > 0 && wait > 0) {
@@ -385,13 +387,25 @@ function actionAllowed(ctx: VaultCtx, now: number): boolean {
   return true;
 }
 
+// what the signer may spend of a token: gas money stays above the floor
+function spendable(ctx: VaultCtx, token: string, bal: ethers.BigNumber): ethers.BigNumber {
+  if (token.toLowerCase() !== assetPrecompile(ctx.cfg.REANCHOR_GAS_ASSET).toLowerCase()) return bal;
+  return bal.gt(ctx.cfg.gasFloorWei) ? bal.sub(ctx.cfg.gasFloorWei) : ethers.constants.Zero;
+}
+
+// true when a transaction went out
 async function topUp(ctx: VaultCtx, side: 0 | 1, need: ethers.BigNumber, now: number): Promise<boolean> {
   const { cfg, state } = ctx;
   const { signer, provider } = ctx.chain;
-  const s = ctx.reanchor!.sides[side];
+  const ra = ctx.reanchor!;
+  if (ra.sides[side].unresolved && now - ra.sides[side].resolvedAt >= 3600 && ctx.chain.substrate) {
+    const token = side === 0 ? ctx.token0.address : ctx.token1.address;
+    ra.sides[side] = await resolveReanchorSide(ctx.chain.substrate, token, provider, cfg.REANCHOR_GAS_ASSET);
+  }
+  const s = ra.sides[side];
 
   if (s.wrap) {
-    const bal: ethers.BigNumber = await s.wrap.underlying.balanceOf(signer.address);
+    const bal = spendable(ctx, s.wrap.underlying.address, await s.wrap.underlying.balanceOf(signer.address));
     if (bal.gt(0)) {
       let amount = bal.lt(need) ? bal : need;
       // a remainder under the ED would only feed the duster
@@ -401,11 +415,13 @@ async function topUp(ctx: VaultCtx, side: 0 | 1, need: ethers.BigNumber, now: nu
         return false;
       }
       if (!actionAllowed(ctx, now)) return false;
-      state.lastReanchorActionTs = now;
       const overrides = await txOverrides(ctx.chain);
-      if (await wrapOnce({ signer, pool: s.wrap.pool, underlying: s.wrap.underlying.address, amount, overrides, confirmations: cfg.CONFIRMATIONS, log: ctx.log })) {
+      const r = await wrapOnce({ signer, pool: s.wrap.pool, underlying: s.wrap.underlying.address, amount, overrides, confirmations: cfg.CONFIRMATIONS, log: ctx.log });
+      if (r.sent) {
+        state.lastReanchorActionTs = now;
         return true;
       }
+      // a supply that fails its preflight (frozen reserve, cap) spent nothing: buy instead
     }
   }
 
@@ -431,10 +447,12 @@ async function topUp(ctx: VaultCtx, side: 0 | 1, need: ethers.BigNumber, now: nu
   const api = (chain.substrate = await freshSubstrate(chain.substrate!, () => connectSubstrate(chain.cfg.RPC_URL)));
   // at least the ED out, so the purchase is not dust for the duster
   const call = routerSellCall(api, cfg.REANCHOR_GAS_ASSET, s.assetId, buyIn, s.ed ?? ethers.BigNumber.from(1));
-  state.lastReanchorActionTs = now;
-  buys.push(now);
-  const overrides = await txOverrides(ctx.chain);
-  return !!(await buyWithGasOnce({ signer, call, overrides, confirmations: cfg.CONFIRMATIONS, log: ctx.log }));
+  const r = await buyWithGasOnce({ signer, call, overrides: await txOverrides(ctx.chain), confirmations: cfg.CONFIRMATIONS, log: ctx.log });
+  if (r.sent) {
+    state.lastReanchorActionTs = now;
+    buys.push(now);
+  }
+  return r.sent;
 }
 
 async function clearOwnBridges(ctx: VaultCtx, now: number, known?: Bridge[]): Promise<boolean> {
@@ -444,8 +462,7 @@ async function clearOwnBridges(ctx: VaultCtx, now: number, known?: Bridge[]): Pr
   const live = new Set(bridges.map((b) => b.tokenId.toString()));
   state.bridgeIds = state.bridgeIds.filter((id) => live.has(id));
   if (!bridges.length) return false;
-  state.lastReanchorActionTs = now;
-  const cleared = await clearBridgesOnce({
+  const r = await clearBridgesOnce({
     signer: ctx.chain.signer,
     npm: ctx.reanchor!.npm,
     bridges,
@@ -454,8 +471,9 @@ async function clearOwnBridges(ctx: VaultCtx, now: number, known?: Bridge[]): Pr
     confirmations: cfg.CONFIRMATIONS,
     log: ctx.log,
   });
-  state.bridgeIds = state.bridgeIds.filter((id) => !cleared.includes(id));
-  return cleared.length > 0;
+  if (r.sent) state.lastReanchorActionTs = now;
+  state.bridgeIds = state.bridgeIds.filter((id) => !r.cleared.includes(id));
+  return r.sent;
 }
 
 // the router cannot swap across zero liquidity, the normal state of a one-sided vault: lay one spacing of the other token past spot
@@ -496,7 +514,7 @@ async function layBridge(
   const token = side === 0 ? ctx.token0 : ctx.token1;
   const sym = side === 0 ? ctx.symbol0 : ctx.symbol1;
   if (amount.isZero()) return false;
-  const bal: ethers.BigNumber = await token.balanceOf(signer.address);
+  const bal = spendable(ctx, token.address, await token.balanceOf(signer.address));
   if (bal.lt(amount)) {
     if (await topUp(ctx, side, amount.sub(bal), now)) {
       ctx.log(`re-anchor: topped up ${sym} for a bridge, laying it next block`);
@@ -510,8 +528,7 @@ async function layBridge(
     return false;
   }
   if (!actionAllowed(ctx, now)) return false;
-  state.lastReanchorActionTs = now;
-  const minted = await mintBridgeOnce({
+  const r = await mintBridgeOnce({
     signer,
     npm: ra.npm,
     token0: ctx.token0.address,
@@ -526,16 +543,22 @@ async function layBridge(
     confirmations: cfg.CONFIRMATIONS,
     log: ctx.log,
   });
-  if (!minted) return false;
-  state.bridgeIds.push(minted.tokenId);
-  ctx.log('re-anchor: swapping across the bridge next block');
-  return true;
+  if (r.sent) state.lastReanchorActionTs = now;
+  if (r.minted) {
+    state.bridgeIds.push(r.minted.tokenId);
+    ctx.log('re-anchor: swapping across the bridge next block');
+  }
+  return r.sent;
 }
 
-// walk a stranded pool to the oracle when no arbitrage will; true only when a swap landed
+// true when it sent a transaction, after which the cycle waits for the next block
 export async function runReanchor(ctx: VaultCtx, spotTick: number, now: number): Promise<boolean> {
   const { cfg, state } = ctx;
   if (!ctx.oracle || !ctx.reanchor) return false;
+  const armed = state.reanchorDwellSince > 0 && now - state.reanchorDwellSince >= ctx.dwellSecs;
+  if (!armed && state.lastReanchorCheckTs > 0 && now - state.lastReanchorCheckTs < REANCHOR_SAMPLE_SECS) return false;
+  state.lastReanchorCheckTs = now;
+  let acted = false;
   try {
     let o: OracleReading;
     try {
@@ -563,17 +586,17 @@ export async function runReanchor(ctx: VaultCtx, spotTick: number, now: number):
           });
     if (t.tooFar) ctx.log(`re-anchor: ${t.reason}`);
     // a bridge left behind (failed swap, or the gap closed by itself) is taken back once nothing needs it
-    if (!t.trigger && state.bridgeIds.length && actionAllowed(ctx, now)) await clearOwnBridges(ctx, now);
-    if (!stepDwell(ctx, 'reanchorDwellSince', t.trigger, now, 're-anchor')) return false;
+    if (!t.trigger && state.bridgeIds.length && actionAllowed(ctx, now)) acted = await clearOwnBridges(ctx, now);
+    if (!stepDwell(ctx, 'reanchorDwellSince', t.trigger, now, 're-anchor')) return acted;
 
-    if (state.regime.regime === 'extreme') {
+    if (cfg.REGIME_ENABLED && (await evaluateRegime(ctx, state, now, true, o.price)).regime === 'extreme') {
       ctx.log('re-anchor: regime EXTREME — not trading into it');
-      return false;
+      return acted;
     }
     const since = now - state.lastReanchorTs;
     if (state.lastReanchorTs > 0 && since < cfg.REANCHOR_MIN_INTERVAL_SECS) {
       ctx.log(`re-anchor: min interval (${since}s < ${cfg.REANCHOR_MIN_INTERVAL_SECS}s)`);
-      return false;
+      return acted;
     }
 
     const side = t.zeroForOne ? 0 : 1;
@@ -582,18 +605,19 @@ export async function runReanchor(ctx: VaultCtx, spotTick: number, now: number):
     const sym = side === 0 ? ctx.symbol0 : ctx.symbol1;
     if (cap.isZero()) {
       ctx.log(`re-anchor: REANCHOR_MAX_IN${side} is 0 — not selling ${sym}`);
-      return false;
+      return acted;
     }
 
     const { provider, signer } = ctx.chain;
-    const [gasBal, held]: [ethers.BigNumber, ethers.BigNumber] = await Promise.all([
+    const [gasBal, rawHeld]: [ethers.BigNumber, ethers.BigNumber] = await Promise.all([
       provider.getBalance(signer.address),
       tokenIn.balanceOf(signer.address),
     ]);
     if (gasBal.lt(cfg.gasFloorWei)) {
       ctx.log(`re-anchor: gas (WETH) balance ${ethers.utils.formatEther(gasBal)} below floor`);
-      return false;
+      return acted;
     }
+    const held = spendable(ctx, tokenIn.address, rawHeld);
     const limit = sqrtX96FromPrice(o.price * Math.pow(10, ctx.decimals1 - ctx.decimals0));
     const probe = async (amountIn: ethers.BigNumber): Promise<Probe> => {
       try {
@@ -606,52 +630,54 @@ export async function runReanchor(ctx: VaultCtx, spotTick: number, now: number):
         });
         return { kind: q.sqrtPriceX96After.eq(limit) ? 'reaches' : 'short', q };
       } catch (e: any) {
-        // only a contract revert over zero active liquidity is an empty gap; an rpc failure is retried
-        if (e?.code === 'CALL_EXCEPTION' && ethers.BigNumber.from(await ctx.pool.liquidity()).isZero()) return { kind: 'empty' };
+        // only a revert over zero active liquidity is an empty gap; anything else is retried
+        if (isRevert(e) && ethers.BigNumber.from(await ctx.pool.liquidity()).isZero()) return { kind: 'empty' };
         return { kind: 'error', reason: revertReason(e) };
       }
     };
 
-    let amountIn = held.lt(cap) ? held : cap;
-    let p: Probe | null = amountIn.gt(0) ? await probe(amountIn) : null;
-    // short of the budget is fine while it still reaches; an empty gap needs a bridge, not more of the token
-    if (amountIn.lt(cap) && (p === null || p.kind === 'short') && (await topUp(ctx, side, cap.sub(amountIn), now))) {
-      ctx.log('re-anchor: topped up, swapping next block');
-      return false;
+    // the quoter needs no balance: whether the budget reaches is known before anything is bought
+    const full = await probe(cap);
+    if (full.kind === 'error') {
+      ctx.log(`re-anchor: quote failed, retrying next block — ${full.reason}`);
+      return acted;
     }
-    if (amountIn.isZero()) {
-      if (!cfg.DRY_RUN) {
-        ctx.log(`re-anchor: signer ${signer.address} holds no ${sym} and could not get any — send it up to ${cap.toString()} raw`);
-        return false;
+    if (full.kind === 'empty') return (await layBridge(ctx, t.zeroForOne, spotTick, o.tick, o.price, cap, now)) || acted;
+    if (full.kind === 'short') {
+      const reached = tickFromPrice(priceFromSqrtX96(full.q.sqrtPriceX96After));
+      ctx.log(`re-anchor: ${cap.toString()} raw ${sym} only moves spot to ${reached}, oracle ${o.tick} — liquidity in the gap, leaving it to arbitrage`);
+      return acted;
+    }
+
+    let amountIn = cap;
+    let q = full.q;
+    if (held.lt(cap)) {
+      const part = held.gt(0) ? await probe(held) : null;
+      if (part?.kind === 'reaches') {
+        amountIn = held;
+        q = part.q;
+      } else {
+        if (await topUp(ctx, side, cap.sub(held), now)) {
+          ctx.log('re-anchor: topped up, swapping next block');
+          return true;
+        }
+        if (!cfg.DRY_RUN) {
+          ctx.log(
+            held.isZero()
+              ? `re-anchor: signer ${signer.address} holds no ${sym} and could not get any — send it up to ${cap.toString()} raw`
+              : `re-anchor: holds only ${held.toString()} of the ${cap.toString()} raw ${sym} budget and could not top up`,
+          );
+          return acted;
+        }
       }
-      amountIn = cap;
-      p = await probe(cap);
     }
-    if (p!.kind === 'error') {
-      ctx.log(`re-anchor: quote failed, retrying next block — ${p!.reason}`);
-      return false;
-    }
-    if (p!.kind === 'empty') {
-      await layBridge(ctx, t.zeroForOne, spotTick, o.tick, o.price, cap, now);
-      return false;
-    }
-    if (p!.kind === 'short') {
-      const reached = tickFromPrice(priceFromSqrtX96(p!.q.sqrtPriceX96After));
-      ctx.log(
-        amountIn.lt(cap)
-          ? `re-anchor: holds only ${amountIn.toString()} of the ${cap.toString()} raw ${sym} budget and could not top up; it moves spot only to ${reached}, oracle ${o.tick}`
-          : `re-anchor: ${amountIn.toString()} raw ${sym} only moves spot to ${reached}, oracle ${o.tick} — liquidity in the gap, leaving it to arbitrage`,
-      );
-      return false;
-    }
-    const q = p!.q;
     ctx.log(
       `re-anchor: sell <=${amountIn.toString()} raw ${sym}, limit at oracle tick ${o.tick} (spot ${spotTick}), ` +
         `quoted ${q.amountOut.toString()} raw out`,
     );
     if (cfg.DRY_RUN) {
       ctx.log('re-anchor: DRY_RUN, not sending');
-      return false;
+      return acted;
     }
 
     const r = await reanchorOnce({
@@ -668,8 +694,11 @@ export async function runReanchor(ctx: VaultCtx, spotTick: number, now: number):
       log: ctx.log,
     });
     // a swap that reached the chain backs off for the interval; a preflight revert retries next block
-    if (r.sent) state.lastReanchorTs = now;
-    if (!r.ok) return false;
+    if (r.sent) {
+      state.lastReanchorTs = now;
+      acted = true;
+    }
+    if (!r.ok) return acted;
     state.reanchorDwellSince = 0;
     const after = await readSlot0(ctx.pool);
     ctx.log(`re-anchor: ✓ spot ${spotTick} -> ${after.tick}, oracle ${o.tick} — ${r.hash}`);
@@ -677,7 +706,7 @@ export async function runReanchor(ctx: VaultCtx, spotTick: number, now: number):
     return true;
   } catch (e: any) {
     ctx.log(`re-anchor: error — ${e?.message ?? e}`);
-    return false;
+    return acted;
   }
 }
 

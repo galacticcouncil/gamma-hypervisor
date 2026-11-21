@@ -6,6 +6,7 @@ import { log, logTagged } from './log';
 import type { MmFeed } from './oracle';
 import type { ApiPromise } from '@polkadot/api';
 import { assetIdOf, connectSubstrate, existentialDeposit, hasStoredRoute } from './substrate';
+import { isRevert } from './reanchor';
 
 /**
  * The process-wide half: one RPC connection, one signer, one nonce.
@@ -29,6 +30,9 @@ export interface ReanchorSide {
   wrap?: { pool: string; underlying: ethers.Contract; underlyingEd: ethers.BigNumber | null };
   // the runtime router has a stored route from the gas asset to this token
   gasRoute: boolean;
+  // a lookup failed for a reason other than a revert; re-resolved at most hourly
+  unresolved: boolean;
+  resolvedAt: number;
 }
 
 /** What validateRoles found at startup; served by the status listener. */
@@ -214,7 +218,7 @@ export async function createVaultContext(
     }
     chain.substrate ??= await connectSubstrate(chain.cfg.RPC_URL);
     const sides = (await Promise.all(
-      [token0, token1].map((t) => reanchorSide(chain.substrate!, t, provider, chain.cfg.REANCHOR_GAS_ASSET)),
+      [token0, token1].map((t) => resolveReanchorSide(chain.substrate!, t, provider, chain.cfg.REANCHOR_GAS_ASSET)),
     )) as [ReanchorSide, ReanchorSide];
     reanchor = { router, quoter, npm, fee: Number(fee), sides };
   }
@@ -248,31 +252,38 @@ export async function createVaultContext(
   return ctx;
 }
 
-async function reanchorSide(
+export async function resolveReanchorSide(
   api: ApiPromise,
   token: string,
   provider: ethers.providers.Provider,
   gasAsset: number,
 ): Promise<ReanchorSide> {
-  // a missing id or ED costs this side its top-ups, never the keeper's startup
-  const assetId = await assetIdOf(api, token).catch(() => null);
-  const ed = assetId !== null ? await existentialDeposit(api, assetId).catch(() => null) : null;
-  const at = new ethers.Contract(token, ATOKEN_ABI, provider);
-  const [underlying, pool] = await Promise.all([
-    at.UNDERLYING_ASSET_ADDRESS().catch(() => null),
-    at.POOL().catch(() => null),
-  ]);
+  let unresolved = false;
+  const soft = <T>(p: Promise<T>, fallback: T): Promise<T> =>
+    p.catch(() => {
+      unresolved = true;
+      return fallback;
+    });
+  // a revert means "not an aToken"; anything else is a lookup to retry
+  const aToken = (f: string): Promise<string | null> =>
+    new ethers.Contract(token, ATOKEN_ABI, provider)[f]().catch((e: any) => {
+      if (!isRevert(e)) unresolved = true;
+      return null;
+    });
+  const assetId = await soft(assetIdOf(api, token), null);
+  const ed = assetId !== null ? await soft(existentialDeposit(api, assetId), null) : null;
+  const [underlying, pool] = await Promise.all([aToken('UNDERLYING_ASSET_ADDRESS'), aToken('POOL')]);
   let wrap: ReanchorSide['wrap'];
   if (underlying && pool) {
-    const uid = await assetIdOf(api, underlying).catch(() => null);
+    const uid = await soft(assetIdOf(api, underlying), null);
     wrap = {
       pool,
       underlying: new ethers.Contract(underlying, ERC20_ABI, provider),
-      underlyingEd: uid !== null ? await existentialDeposit(api, uid).catch(() => null) : null,
+      underlyingEd: uid !== null ? await soft(existentialDeposit(api, uid), null) : null,
     };
   }
-  const gasRoute = assetId !== null && assetId !== gasAsset && (await hasStoredRoute(api, gasAsset, assetId).catch(() => false));
-  return { assetId, ed, wrap, gasRoute };
+  const gasRoute = assetId !== null && assetId !== gasAsset && (await soft(hasStoredRoute(api, gasAsset, assetId), false));
+  return { assetId, ed, wrap, gasRoute, unresolved, resolvedAt: Math.floor(Date.now() / 1000) };
 }
 
 /**
