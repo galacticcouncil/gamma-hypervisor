@@ -136,7 +136,9 @@ fire, push the pool price with a large swap, then wait `DWELL_SECS`.
 | `REANCHOR_MAX_IN0` / `REANCHOR_MAX_IN1` | `0` | dust budget per swap, raw units of the token sold; `0` never sells that side |
 | `REANCHOR_MAX_TICKS` | `1500` | leave a wider gap to an operator |
 | `REANCHOR_MIN_INTERVAL_SECS` | `3600` | min seconds between re-anchor swaps |
-| `SWAP_ROUTER` / `QUOTER` | — | SwapRouter02 / QuoterV2, process-wide; required when any vault enables re-anchor |
+| `SWAP_ROUTER` / `QUOTER` | Hydration mainnet SwapRouter02 `0x5a79…4159` / QuoterV2 `0x9D7c…9974` | process-wide; startup fails if either does not serve the pool's factory, so set both on other chains |
+| `REANCHOR_GAS_BUY_IN` | `100000000000000` | gas money (raw) to sell for the token when the signer has neither it nor its underlying; `0` = never |
+| `REANCHOR_GAS_ASSET` | `20` | the gas asset (WETH) that buys it |
 | **operations** | | |
 | `GAS_FLOOR_WEI` | `0` | skip if signer WETH-gas balance below this |
 | `GAS_LIMIT` | `3000000` | rebalance gas limit |
@@ -195,7 +197,17 @@ only if the budget reaches the oracle; if it does not, the gap holds real liquid
 arbitrage is paid to close it. After the swap the TWAP gate holds the rebalance until
 the pool's average catches up, then the keeper re-centers as usual.
 
-- the signer must hold the tokens it sells: fund it with a dust amount of each pool token;
+- it tops itself up when what it holds cannot reach the oracle: an aToken's underlying in the
+  signer is supplied to the money market first, otherwise it buys the token with
+  `REANCHOR_GAS_BUY_IN` of gas money through the runtime router (`router.sell` with an empty
+  route, so the stored route; sent through the dispatch precompile), asking at least the
+  token's ED out and never below `GAS_FLOOR_WEI`. It swaps on the next block. A wrap never
+  leaves an underlying remainder under the ED, which the duster would sweep;
+- an aToken transfer can credit the pool one wei short at a given liquidity index, which the pool
+  rejects as `IIA`. A preflight revert costs nothing and is retried next block; only a swap that
+  reached the chain starts `REANCHOR_MIN_INTERVAL_SECS`;
+- the token a re-anchor buys back (HOLLAR here) arrives in dust amounts under its ED, so the
+  duster sweeps it;
 - SwapRouter02 and QuoterV2 reject a swap that crosses no liquidity at all, so a gap with
   literally nothing in it is reported (`re-anchor: quote reverted`) and left alone;
 - skipped in the `extreme` regime, on a stale or unreadable feed, and past

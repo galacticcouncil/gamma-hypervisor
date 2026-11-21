@@ -5,7 +5,15 @@ import { shouldReanchor } from '../src/decide';
 import { runReanchor } from '../src/keeper';
 import { priceFromSqrtX96, sqrtPriceFromTick, sqrtX96FromPrice, tickFromPrice } from '../src/price';
 import { blankState } from '../src/state';
+import { precompileAssetId } from '../src/substrate';
 import type { VaultCtx } from '../src/chain';
+import { buyWithGasOnce, reanchorOnce, wrapOnce } from '../src/reanchor';
+
+vi.mock('../src/reanchor', () => ({
+  reanchorOnce: vi.fn(async () => ({ sent: true, ok: true, hash: '0x' + 'ab'.repeat(32) })),
+  wrapOnce: vi.fn(async () => '0x' + 'cd'.repeat(32)),
+  buyWithGasOnce: vi.fn(async () => '0x' + 'ef'.repeat(32)),
+}));
 
 const KEY = '0x' + '11'.repeat(32);
 const VAULT = '0x' + 'aa'.repeat(20);
@@ -16,6 +24,8 @@ const TREASURY = '0x' + 'ee'.repeat(20);
 const HOLLAR = '0x' + '01'.repeat(20);
 const ATBTC = '0x' + '02'.repeat(20);
 const SIGNER = '0x' + '03'.repeat(20);
+const TBTC = '0x00000000000000000000000000000001000f453d';
+const MM_POOL = '0x' + '04'.repeat(20);
 
 const BN = ethers.BigNumber.from;
 const NOW = 1_795_000_000;
@@ -100,16 +110,10 @@ describe('re-anchor config', () => {
     expect(cfg.reanchorMaxIn1.toString()).toBe('10000000000000');
   });
 
-  it('needs the oracle, the router, the quoter and a budget', () => {
+  it('needs the oracle and a budget', () => {
     process.env.ORACLE_ENABLED = 'false';
     expect(() => loadConfig()).toThrow(/ORACLE_ENABLED/);
     process.env.ORACLE_ENABLED = 'true';
-    delete process.env.SWAP_ROUTER;
-    expect(() => loadConfig()).toThrow(/SWAP_ROUTER/);
-    process.env.SWAP_ROUTER = ROUTER;
-    delete process.env.QUOTER;
-    expect(() => loadConfig()).toThrow(/QUOTER/);
-    process.env.QUOTER = QUOTER;
     process.env.REANCHOR_MAX_IN0 = '0';
     process.env.REANCHOR_MAX_IN1 = '0';
     expect(() => loadConfig()).toThrow(/budget/);
@@ -118,6 +122,14 @@ describe('re-anchor config', () => {
   it('must reach past the oracle clamp', () => {
     process.env.REANCHOR_MAX_TICKS = '200';
     expect(() => loadConfig()).toThrow(/REANCHOR_MAX_TICKS/);
+  });
+
+  it('defaults the router and quoter to hydration mainnet', () => {
+    delete process.env.SWAP_ROUTER;
+    delete process.env.QUOTER;
+    const cfg = loadConfig();
+    expect(cfg.SWAP_ROUTER).toBe('0x5a79dE848626994c4099640EF5c48Fd65DAe4159');
+    expect(cfg.QUOTER).toBe('0x9D7c18Be9AdD2748784A3c6F9071D67CA8f29974');
   });
 
   it('keeps the router and quoter process-wide', () => {
@@ -132,11 +144,16 @@ describe('re-anchor config', () => {
 });
 
 describe('runReanchor', () => {
+  const CAP = BN('10000000000000');
+  const TBTC_ED = BN('106803374987');
+
   function harness(o: {
     dryRun?: boolean;
     feedAgeSecs?: number;
     usd?: number;
-    held1?: ethers.BigNumber;
+    held1?: ethers.BigNumber[];
+    underlying?: ethers.BigNumber;
+    gas?: ethers.BigNumber;
     reach?: boolean;
     dwellSecs?: number;
   } = {}) {
@@ -147,14 +164,17 @@ describe('runReanchor', () => {
       amountOut: BN('1612571438082522'),
       sqrtPriceX96After: o.reach === false ? BN(p.sqrtPriceLimitX96).sub(1_000_000_000) : BN(p.sqrtPriceLimitX96),
     }));
-    const send = vi.fn();
+    const sell = vi.fn((..._args: unknown[]) => ({ method: { toHex: () => '0xd15a' } }));
+    // successive balanceOf reads walk the list, the last value sticks
+    const held1 = [...(o.held1 ?? [BN('20000000000000')])];
     const usd = o.usd ?? BTC_USD;
     const ctx = {
       cfg,
       chain: {
         cfg,
-        provider: { getBalance: async () => BN('10000000000000000') },
+        provider: { getBalance: async () => o.gas ?? BN('10000000000000000'), send: async () => '0x1' },
         signer: { address: SIGNER },
+        substrate: { tx: { router: { sell } } },
       },
       oracle: {
         feed0: {
@@ -168,11 +188,21 @@ describe('runReanchor', () => {
       },
       reanchor: {
         quoter: { callStatic: { quoteExactInputSingle: quote } },
-        router: { address: ROUTER, exactInputSingle: send, callStatic: { exactInputSingle: send } },
+        router: { address: ROUTER },
         fee: 3000,
+        sides: [
+          { assetId: 222, ed: BN('20000000000000000'), gasRoute: true },
+          {
+            assetId: 1006,
+            ed: BN('208779411374'),
+            wrap: { pool: MM_POOL, underlying: { address: TBTC, balanceOf: async () => o.underlying ?? BN(0) }, underlyingEd: TBTC_ED },
+            gasRoute: true,
+          },
+        ],
       },
+      pool: { slot0: async () => ({ sqrtPriceX96: BN(1), tick: -109849 }) },
       token0: { address: HOLLAR, balanceOf: async () => BN(0) },
-      token1: { address: ATBTC, balanceOf: async () => o.held1 ?? BN('5000000000000') },
+      token1: { address: ATBTC, balanceOf: async () => (held1.length > 1 ? held1.shift()! : held1[0]) },
       symbol0: 'HOLLAR',
       symbol1: 'atBTC',
       decimals0: 18,
@@ -181,10 +211,16 @@ describe('runReanchor', () => {
       state: blankState(),
       log: (m: string) => lines.push(m.trim()),
     } as unknown as VaultCtx;
-    return { ctx, lines, quote, send };
+    return { ctx, lines, quote, sell };
   }
 
   const SPOT = -110298;
+
+  beforeEach(() => {
+    vi.mocked(reanchorOnce).mockClear();
+    vi.mocked(wrapOnce).mockClear();
+    vi.mocked(buyWithGasOnce).mockClear();
+  });
 
   it('plans a capped sell of atBTC with its limit at the oracle price', async () => {
     const h = harness({ dryRun: true });
@@ -194,12 +230,19 @@ describe('runReanchor', () => {
     expect(p.tokenIn).toBe(ATBTC);
     expect(p.tokenOut).toBe(HOLLAR);
     expect(p.fee).toBe(3000);
-    // the signer holds less than the budget: it sells what it has
-    expect(p.amountIn.toString()).toBe('5000000000000');
+    expect(p.amountIn.toString()).toBe(CAP.toString());
     expect(p.sqrtPriceLimitX96.eq(sqrtX96FromPrice(1 / BTC_USD))).toBe(true);
     expect(tickFromPrice(priceFromSqrtX96(p.sqrtPriceLimitX96))).toBe(ORACLE_TICK);
-    expect(h.lines.some((l) => l.startsWith('re-anchor: DRY_RUN'))).toBe(true);
-    expect(h.send).not.toHaveBeenCalled();
+    expect(h.lines.some((l) => l.startsWith('re-anchor: DRY_RUN, not sending'))).toBe(true);
+    expect(reanchorOnce).not.toHaveBeenCalled();
+  });
+
+  it('swaps live, capped at the budget', async () => {
+    const h = harness();
+    expect(await runReanchor(h.ctx, SPOT, NOW)).toBe(true);
+    expect(vi.mocked(reanchorOnce).mock.calls[0][0].amountIn.toString()).toBe(CAP.toString());
+    expect(h.ctx.state.lastReanchorTs).toBe(NOW);
+    expect(h.lines.some((l) => l.startsWith('re-anchor: ✓ spot -110298 -> -109849'))).toBe(true);
   });
 
   it('waits out the dwell before it trades', async () => {
@@ -215,20 +258,86 @@ describe('runReanchor', () => {
     const h = harness({ reach: false });
     expect(await runReanchor(h.ctx, SPOT, NOW)).toBe(false);
     expect(h.lines.some((l) => l.includes('leaving it to arbitrage'))).toBe(true);
-    expect(h.send).not.toHaveBeenCalled();
+    expect(reanchorOnce).not.toHaveBeenCalled();
   });
 
-  it('asks for funding instead of quoting when the signer holds none of the token to sell', async () => {
-    const h = harness({ held1: BN(0) });
+  it('sells a short balance as is when it still reaches the oracle', async () => {
+    const h = harness({ held1: [BN('5000000000000')] });
+    expect(await runReanchor(h.ctx, SPOT, NOW)).toBe(true);
+    expect(wrapOnce).not.toHaveBeenCalled();
+    expect(buyWithGasOnce).not.toHaveBeenCalled();
+    expect(vi.mocked(reanchorOnce).mock.calls[0][0].amountIn.toString()).toBe('5000000000000');
+  });
+
+  it('supplies the underlying it holds, then sells the aToken on the next block', async () => {
+    const h = harness({ held1: [BN(0), CAP], underlying: BN('103650801406404') });
     expect(await runReanchor(h.ctx, SPOT, NOW)).toBe(false);
+    const w = vi.mocked(wrapOnce).mock.calls[0][0];
+    expect(w.underlying).toBe(TBTC);
+    expect(w.pool).toBe(MM_POOL);
+    expect(w.amount.toString()).toBe(CAP.toString());
+    expect(buyWithGasOnce).not.toHaveBeenCalled();
+    expect(reanchorOnce).not.toHaveBeenCalled();
+    expect(h.ctx.state.lastReanchorTs).toBe(0);
+    expect(await runReanchor(h.ctx, SPOT, NOW + 2)).toBe(true);
+    expect(vi.mocked(reanchorOnce).mock.calls[0][0].amountIn.toString()).toBe(CAP.toString());
+    expect(vi.mocked(reanchorOnce).mock.calls[0][0].approve.toString()).toBe(CAP.toString());
+  });
+
+  it('supplies all of the underlying rather than leave the duster a remainder', async () => {
+    const all = CAP.add(50_000_000_000);
+    const h = harness({ held1: [BN(0)], underlying: all });
+    await runReanchor(h.ctx, SPOT, NOW);
+    expect(vi.mocked(wrapOnce).mock.calls[0][0].amount.toString()).toBe(all.toString());
+  });
+
+  it('buys with gas money when there is nothing to supply, asking at least the ED', async () => {
+    const h = harness({ held1: [BN(0), BN('3000000000000')] });
+    expect(await runReanchor(h.ctx, SPOT, NOW)).toBe(false);
+    expect(wrapOnce).not.toHaveBeenCalled();
+    expect(h.sell).toHaveBeenCalledWith(20, 1006, '100000000000000', '208779411374', []);
+    expect(vi.mocked(buyWithGasOnce).mock.calls[0][0].call).toBe('0xd15a');
+    expect(await runReanchor(h.ctx, SPOT, NOW + 2)).toBe(true);
+    expect(vi.mocked(reanchorOnce).mock.calls[0][0].amountIn.toString()).toBe('3000000000000');
+  });
+
+  it('retries next block after a preflight revert, but backs off after a sent swap fails', async () => {
+    const h = harness();
+    vi.mocked(reanchorOnce).mockResolvedValueOnce({ sent: false, ok: false, hash: null });
+    expect(await runReanchor(h.ctx, SPOT, NOW)).toBe(false);
+    expect(h.ctx.state.lastReanchorTs).toBe(0);
+    vi.mocked(reanchorOnce).mockResolvedValueOnce({ sent: true, ok: false, hash: '0x01' });
+    expect(await runReanchor(h.ctx, SPOT, NOW + 2)).toBe(false);
+    expect(h.ctx.state.lastReanchorTs).toBe(NOW + 2);
+  });
+
+  it('keeps the gas floor', async () => {
+    process.env.GAS_FLOOR_WEI = '1000000000000000';
+    const h = harness({ held1: [BN(0)], gas: BN('1050000000000000') });
+    expect(await runReanchor(h.ctx, SPOT, NOW)).toBe(false);
+    expect(buyWithGasOnce).not.toHaveBeenCalled();
+    expect(h.lines.some((l) => l.includes('too low to buy with'))).toBe(true);
+    expect(h.lines.some((l) => l.includes('could not get any'))).toBe(true);
+  });
+
+  it('never buys when REANCHOR_GAS_BUY_IN is 0', async () => {
+    process.env.REANCHOR_GAS_BUY_IN = '0';
+    const h = harness({ held1: [BN(0)] });
+    expect(await runReanchor(h.ctx, SPOT, NOW)).toBe(false);
+    expect(buyWithGasOnce).not.toHaveBeenCalled();
     expect(h.quote).not.toHaveBeenCalled();
-    expect(h.lines.some((l) => l.includes('holds no atBTC'))).toBe(true);
+  });
+
+  it('only plans the top-up in DRY_RUN', async () => {
+    const h = harness({ dryRun: true, held1: [BN(0)], underlying: BN('103650801406404') });
+    expect(await runReanchor(h.ctx, SPOT, NOW)).toBe(false);
+    expect(wrapOnce).not.toHaveBeenCalled();
+    expect(h.lines.some((l) => l.startsWith('re-anchor: DRY_RUN, would supply 10000000000000'))).toBe(true);
   });
 
   it('does nothing while spot is within the clamp', async () => {
     const h = harness({ dryRun: true });
-    const spotNearOracle = ORACLE_TICK - 150;
-    expect(await runReanchor(h.ctx, spotNearOracle, NOW)).toBe(false);
+    expect(await runReanchor(h.ctx, ORACLE_TICK - 150, NOW)).toBe(false);
     expect(h.quote).not.toHaveBeenCalled();
     expect(h.lines).toEqual([]);
   });
@@ -257,5 +366,13 @@ describe('runReanchor', () => {
     extreme.ctx.state.regime = { regime: 'extreme', since: NOW - 60 };
     expect(await runReanchor(extreme.ctx, SPOT, NOW)).toBe(false);
     expect(extreme.quote).not.toHaveBeenCalled();
+  });
+});
+
+describe('precompileAssetId', () => {
+  it('reads the asset id out of a multicurrency precompile address', () => {
+    expect(precompileAssetId(TBTC)).toBe(1000765);
+    expect(precompileAssetId('0x0000000000000000000000000000000100000014')).toBe(20);
+    expect(precompileAssetId(HOLLAR)).toBeNull();
   });
 });

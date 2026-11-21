@@ -4,6 +4,8 @@ import { resolveDwellSecs, type Config, type GlobalConfig } from './config';
 import { blankState, type KeeperState } from './state';
 import { log, logTagged } from './log';
 import type { MmFeed } from './oracle';
+import type { ApiPromise } from '@polkadot/api';
+import { assetIdOf, connectSubstrate, existentialDeposit, hasStoredRoute } from './substrate';
 
 /**
  * The process-wide half: one RPC connection, one signer, one nonce.
@@ -16,6 +18,17 @@ export interface Chain {
   cfg: GlobalConfig;
   provider: ethers.providers.JsonRpcProvider;
   signer: ethers.Wallet;
+  /** runtime api, connected on first use by a re-anchoring vault */
+  substrate?: ApiPromise;
+}
+
+export interface ReanchorSide {
+  assetId: number | null;
+  ed: ethers.BigNumber | null;
+  /** set when the token is an aToken: what to supply, and where */
+  wrap?: { pool: string; underlying: ethers.Contract; underlyingEd: ethers.BigNumber | null };
+  /** the runtime router has a stored route from the gas asset to this token */
+  gasRoute: boolean;
 }
 
 /** What validateRoles found at startup; served by the status listener. */
@@ -43,7 +56,7 @@ export interface VaultCtx {
   token1: ethers.Contract;
   proxy?: ethers.Contract; // ENTRYPOINT=proxy (Model B)
   oracle?: { feed0: ethers.Contract | MmFeed; feed1?: ethers.Contract }; // ORACLE_ENABLED
-  reanchor?: { router: ethers.Contract; quoter: ethers.Contract; fee: number }; // REANCHOR_ENABLED
+  reanchor?: { router: ethers.Contract; quoter: ethers.Contract; fee: number; sides: [ReanchorSide, ReanchorSide] }; // REANCHOR_ENABLED
   tickSpacing: number;
   decimals0: number;
   decimals1: number;
@@ -173,13 +186,29 @@ export async function createVaultContext(
       }
     : undefined;
 
-  const reanchor = cfg.REANCHOR_ENABLED
-    ? {
-        router: new ethers.Contract(chain.cfg.SWAP_ROUTER!, SWAP_ROUTER02_ABI, signer),
-        quoter: new ethers.Contract(chain.cfg.QUOTER!, QUOTER_V2_ABI, provider),
-        fee: Number(await pool.fee()),
-      }
-    : undefined;
+  let reanchor: VaultCtx['reanchor'];
+  if (cfg.REANCHOR_ENABLED) {
+    const router = new ethers.Contract(chain.cfg.SWAP_ROUTER, SWAP_ROUTER02_ABI, signer);
+    const quoter = new ethers.Contract(chain.cfg.QUOTER, QUOTER_V2_ABI, provider);
+    const [factory, rf, qf, fee] = await Promise.all([
+      pool.factory(),
+      router.factory().catch(() => null),
+      quoter.factory().catch(() => null),
+      pool.fee(),
+    ]);
+    const same = (a: string | null) => !!a && a.toLowerCase() === String(factory).toLowerCase();
+    if (!same(rf) || !same(qf)) {
+      throw new Error(
+        `REANCHOR_ENABLED: SWAP_ROUTER ${router.address} (factory ${rf ?? 'unreadable'}) and QUOTER ${quoter.address} ` +
+          `(factory ${qf ?? 'unreadable'}) must serve this pool's factory ${factory} — set them for this chain`,
+      );
+    }
+    chain.substrate ??= await connectSubstrate(chain.cfg.RPC_URL);
+    const sides = (await Promise.all(
+      [token0, token1].map((t) => reanchorSide(chain.substrate!, t, provider, chain.cfg.REANCHOR_GAS_ASSET)),
+    )) as [ReanchorSide, ReanchorSide];
+    reanchor = { router, quoter, fee: Number(fee), sides };
+  }
 
   const label = cfg.LABEL ?? `${symbol0}/${symbol1}`;
   const ctx: VaultCtx = {
@@ -208,6 +237,32 @@ export async function createVaultContext(
     log: (msg: string) => logTagged(ctx.tag, msg),
   };
   return ctx;
+}
+
+async function reanchorSide(
+  api: ApiPromise,
+  token: string,
+  provider: ethers.providers.Provider,
+  gasAsset: number,
+): Promise<ReanchorSide> {
+  const assetId = await assetIdOf(api, token);
+  const ed = assetId !== null ? await existentialDeposit(api, assetId) : null;
+  const at = new ethers.Contract(token, ATOKEN_ABI, provider);
+  const [underlying, pool] = await Promise.all([
+    at.UNDERLYING_ASSET_ADDRESS().catch(() => null),
+    at.POOL().catch(() => null),
+  ]);
+  let wrap: ReanchorSide['wrap'];
+  if (underlying && pool) {
+    const uid = await assetIdOf(api, underlying);
+    wrap = {
+      pool,
+      underlying: new ethers.Contract(underlying, ERC20_ABI, provider),
+      underlyingEd: uid !== null ? await existentialDeposit(api, uid) : null,
+    };
+  }
+  const gasRoute = assetId !== null && assetId !== gasAsset && (await hasStoredRoute(api, gasAsset, assetId));
+  return { assetId, ed, wrap, gasRoute };
 }
 
 /**

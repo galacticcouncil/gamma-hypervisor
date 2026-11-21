@@ -21,6 +21,7 @@ export const POOL_ABI = [
   'function slot0() view returns (uint160 sqrtPriceX96, int24 tick, uint16 observationIndex, uint16 observationCardinality, uint16 observationCardinalityNext, uint8 feeProtocol, bool unlocked)',
   'function tickSpacing() view returns (int24)',
   'function fee() view returns (uint24)',
+  'function factory() view returns (address)',
   'function observe(uint32[] secondsAgos) view returns (int56[] tickCumulatives, uint160[] secondsPerLiquidityCumulativeX128)',
   'function observations(uint256 index) view returns (uint32 blockTimestamp, int56 tickCumulative, uint160 secondsPerLiquidityCumulativeX128, bool initialized)',
   // Fee accounting: uncollected fees live here, not in the vault's balance.
@@ -80,7 +81,14 @@ export const MM_SOURCE_ABI = [
   'function XToUsdOracle() view returns (address)',
 ];
 
-export const ATOKEN_ABI = ['function UNDERLYING_ASSET_ADDRESS() view returns (address)'];
+export const ATOKEN_ABI = [
+  'function UNDERLYING_ASSET_ADDRESS() view returns (address)',
+  'function POOL() view returns (address)',
+];
+
+export const AAVE_POOL_SUPPLY_ABI = [
+  'function supply(address asset, uint256 amount, address onBehalfOf, uint16 referralCode)',
+];
 
 export const ERC20_SPEND_ABI = [
   'function balanceOf(address) view returns (uint256)',
@@ -90,9 +98,11 @@ export const ERC20_SPEND_ABI = [
 
 // SwapRouter02 (IV3SwapRouter): no deadline field, unlike the v1 SwapRouter
 export const SWAP_ROUTER02_ABI = [
+  'function factory() view returns (address)',
   'function exactInputSingle((address tokenIn, address tokenOut, uint24 fee, address recipient, uint256 amountIn, uint256 amountOutMinimum, uint160 sqrtPriceLimitX96) params) payable returns (uint256 amountOut)',
 ];
 
 export const QUOTER_V2_ABI = [
+  'function factory() view returns (address)',
   'function quoteExactInputSingle((address tokenIn, address tokenOut, uint256 amountIn, uint24 fee, uint160 sqrtPriceLimitX96) params) returns (uint256 amountOut, uint160 sqrtPriceX96After, uint32 initializedTicksCrossed, uint256 gasEstimate)',
 ];

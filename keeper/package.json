@@ -14,6 +14,7 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "@polkadot/api": "^15.10.2",
     "dotenv": "^16.4.5",
     "ethers": "^5.7.2",
     "zod": "^3.23.8"

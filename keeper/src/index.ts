@@ -89,6 +89,16 @@ function vaultBanner(ctx: VaultCtx, blockTimeSecs: number): void {
         : 'off'
     }`,
   );
+  if (ctx.reanchor) {
+    ctx.reanchor.sides.forEach((s, i) => {
+      const sym = i === 0 ? ctx.symbol0 : ctx.symbol1;
+      ctx.log(
+        `    ${sym}: asset ${s.assetId ?? '?'}, ED ${s.ed?.toString() ?? '?'}` +
+          `${s.wrap ? `, wraps ${s.wrap.underlying.address}` : ''}` +
+          `${s.gasRoute ? `, gas route from asset ${cfg.REANCHOR_GAS_ASSET}` : ', no gas route'}`,
+      );
+    });
+  }
   ctx.log(`  compound     ${cfg.COMPOUND_ENABLED ? `every ${cfg.COMPOUND_INTERVAL_SECS}s via Admin ${cfg.ADMIN_ADDRESS}, bounded` : 'off'}`);
 
   // Loud on purpose. DWELL_BLOCKS silently meant a different length of time

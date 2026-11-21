@@ -183,8 +183,13 @@ const Env = z
     // a wider gap is a broken feed or a crash, not a stale pool
     REANCHOR_MAX_TICKS: z.coerce.number().int().positive().default(1500),
     REANCHOR_MIN_INTERVAL_SECS: z.coerce.number().int().nonnegative().default(3600),
-    SWAP_ROUTER: addr.optional(),
-    QUOTER: addr.optional(),
+    // hydration mainnet SwapRouter02 / QuoterV2; checked against the pool's factory at startup
+    SWAP_ROUTER: addr.default('0x5a79dE848626994c4099640EF5c48Fd65DAe4159'),
+    QUOTER: addr.default('0x9D7c18Be9AdD2748784A3c6F9071D67CA8f29974'),
+    // when the signer holds neither the token nor its underlying, buy it with this much
+    // gas money (raw) through the runtime router; 0 = never
+    REANCHOR_GAS_BUY_IN: z.string().regex(/^\d+$/).default('100000000000000'),
+    REANCHOR_GAS_ASSET: z.coerce.number().int().nonnegative().default(20),
 
     GAS_FLOOR_WEI: z.string().regex(/^\d+$/).default('0'),
     GAS_LIMIT: z.coerce.number().int().positive().default(3_000_000),
@@ -252,8 +257,6 @@ const Env = z
       const need = (path: string, message: string) =>
         ctx.addIssue({ code: z.ZodIssueCode.custom, path: [path], message });
       if (!e.ORACLE_ENABLED) need('ORACLE_ENABLED', 'REANCHOR_ENABLED needs the oracle: it is the target');
-      if (!e.SWAP_ROUTER) need('SWAP_ROUTER', 'required when REANCHOR_ENABLED=true (SwapRouter02)');
-      if (!e.QUOTER) need('QUOTER', 'required when REANCHOR_ENABLED=true (QuoterV2)');
       if (BigInt(e.REANCHOR_MAX_IN0) === 0n && BigInt(e.REANCHOR_MAX_IN1) === 0n) {
         need('REANCHOR_MAX_IN0', 'REANCHOR_ENABLED with no budget on either side would never act');
       }
@@ -327,6 +330,8 @@ export const GLOBAL_KEYS = [
   'MM_DATA_PROVIDER',
   'SWAP_ROUTER',
   'QUOTER',
+  'REANCHOR_GAS_BUY_IN',
+  'REANCHOR_GAS_ASSET',
   'STATUS_PORT',
   'STATUS_HOST',
   'STATUS_RING',

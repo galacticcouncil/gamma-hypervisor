@@ -12,7 +12,8 @@ import { preflight, type RebalanceArgs } from './preflight';
 import { txOverrides } from './chain';
 import { submitRebalance } from './submit';
 import { compoundOnce } from './compound';
-import { reanchorOnce } from './reanchor';
+import { buyWithGasOnce, reanchorOnce, wrapOnce } from './reanchor';
+import { routerSellCall } from './substrate';
 import { vaultFees } from './feesOwed';
 import { fetchVolBaseline } from './indexer';
 import { isReservePaused } from './moneyMarket';
@@ -372,6 +373,47 @@ async function runCompound(
   });
 }
 
+// get `need` more of the token a re-anchor sells: supply its underlying if the signer
+// holds some, else buy it with gas money. true when a tx landed
+async function topUp(ctx: VaultCtx, side: 0 | 1, need: ethers.BigNumber): Promise<boolean> {
+  const { cfg } = ctx;
+  const { signer, provider } = ctx.chain;
+  const s = ctx.reanchor!.sides[side];
+  const overrides = await txOverrides(ctx.chain);
+
+  if (s.wrap) {
+    const bal: ethers.BigNumber = await s.wrap.underlying.balanceOf(signer.address);
+    if (bal.gt(0)) {
+      let amount = bal.lt(need) ? bal : need;
+      // a remainder under the ED would only feed the duster
+      if (s.wrap.underlyingEd && bal.sub(amount).lt(s.wrap.underlyingEd)) amount = bal;
+      if (cfg.DRY_RUN) {
+        ctx.log(`re-anchor: DRY_RUN, would supply ${amount.toString()} raw of ${s.wrap.underlying.address}`);
+        return false;
+      }
+      if (await wrapOnce({ signer, pool: s.wrap.pool, underlying: s.wrap.underlying.address, amount, overrides, confirmations: cfg.CONFIRMATIONS, log: ctx.log })) {
+        return true;
+      }
+    }
+  }
+
+  const buyIn = ethers.BigNumber.from(cfg.REANCHOR_GAS_BUY_IN);
+  const api = ctx.chain.substrate;
+  if (buyIn.isZero() || !s.gasRoute || s.assetId === null || !api) return false;
+  const gas = await provider.getBalance(signer.address);
+  if (gas.sub(buyIn).lt(cfg.gasFloorWei)) {
+    ctx.log(`re-anchor: gas ${ethers.utils.formatEther(gas)} too low to buy with`);
+    return false;
+  }
+  // at least the ED out, so the purchase is not dust for the duster
+  const call = routerSellCall(api, cfg.REANCHOR_GAS_ASSET, s.assetId, buyIn, s.ed ?? ethers.BigNumber.from(1));
+  if (cfg.DRY_RUN) {
+    ctx.log(`re-anchor: DRY_RUN, would buy asset ${s.assetId} with ${buyIn.toString()} raw of asset ${cfg.REANCHOR_GAS_ASSET}`);
+    return false;
+  }
+  return !!(await buyWithGasOnce({ signer, call, overrides, confirmations: cfg.CONFIRMATIONS, log: ctx.log }));
+}
+
 // walk a stranded pool to the oracle when no arbitrage will; true only when a swap landed
 export async function runReanchor(ctx: VaultCtx, spotTick: number, now: number): Promise<boolean> {
   const { cfg, state } = ctx;
@@ -432,25 +474,37 @@ export async function runReanchor(ctx: VaultCtx, spotTick: number, now: number):
       ctx.log(`re-anchor: gas (WETH) balance ${ethers.utils.formatEther(gasBal)} below floor`);
       return false;
     }
+    const limit = sqrtX96FromPrice(o.price * Math.pow(10, ctx.decimals1 - ctx.decimals0));
+    const quote = (amountIn: ethers.BigNumber): Promise<{ amountOut: ethers.BigNumber; sqrtPriceX96After: ethers.BigNumber }> =>
+      ctx.reanchor!.quoter.callStatic.quoteExactInputSingle({
+        tokenIn: tokenIn.address,
+        tokenOut: tokenOut.address,
+        amountIn,
+        fee: ctx.reanchor!.fee,
+        sqrtPriceLimitX96: limit,
+      });
+
     let amountIn = held.lt(cap) ? held : cap;
+    // short of the budget is fine while what it holds still reaches the oracle
+    if (amountIn.lt(cap)) {
+      const reaches = amountIn.gt(0) && (await quote(amountIn).then((r) => r.sqrtPriceX96After.eq(limit), () => false));
+      if (!reaches && (await topUp(ctx, side, cap.sub(amountIn)))) {
+        // the dwell stays armed: swap on the next block, against settled state
+        ctx.log('re-anchor: topped up, swapping next block');
+        return false;
+      }
+    }
     if (amountIn.isZero()) {
       if (!cfg.DRY_RUN) {
-        ctx.log(`re-anchor: signer ${signer.address} holds no ${sym} — send it up to ${cap.toString()} raw`);
+        ctx.log(`re-anchor: signer ${signer.address} holds no ${sym} and could not get any — send it up to ${cap.toString()} raw`);
         return false;
       }
       amountIn = cap;
     }
 
-    const limit = sqrtX96FromPrice(o.price * Math.pow(10, ctx.decimals1 - ctx.decimals0));
     let q: { amountOut: ethers.BigNumber; sqrtPriceX96After: ethers.BigNumber };
     try {
-      q = await ctx.reanchor.quoter.callStatic.quoteExactInputSingle({
-        tokenIn: tokenIn.address,
-        tokenOut: tokenOut.address,
-        amountIn,
-        fee: ctx.reanchor.fee,
-        sqrtPriceLimitX96: limit,
-      });
+      q = await quote(amountIn);
     } catch (e: any) {
       ctx.log(`re-anchor: quote reverted (an empty gap cannot be swapped through) — ${e?.reason ?? e?.message ?? e}`);
       return false;
@@ -472,21 +526,23 @@ export async function runReanchor(ctx: VaultCtx, spotTick: number, now: number):
       return false;
     }
 
-    // stamped before sending, so a reverting swap backs off instead of retrying every block
-    state.lastReanchorTs = now;
-    const hash = await reanchorOnce({
+    const r = await reanchorOnce({
       signer,
       router: ctx.reanchor.router,
       tokenIn: tokenIn.address,
       tokenOut: tokenOut.address,
       fee: ctx.reanchor.fee,
       amountIn,
+      approve: cap,
       sqrtPriceLimitX96: limit,
       overrides: await txOverrides(ctx.chain),
       confirmations: cfg.CONFIRMATIONS,
       log: ctx.log,
     });
-    if (!hash) return false;
+    // a swap that reached the chain backs off for the interval; a preflight revert retries next block
+    if (r.sent) state.lastReanchorTs = now;
+    if (!r.ok) return false;
+    const hash = r.hash;
     state.reanchorDwellSince = 0;
     const after = await readSlot0(ctx.pool);
     ctx.log(`re-anchor: ✓ spot ${spotTick} -> ${after.tick}, oracle ${o.tick} — ${hash}`);
