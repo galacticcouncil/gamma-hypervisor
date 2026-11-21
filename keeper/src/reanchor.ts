@@ -131,3 +131,126 @@ export async function buyWithGasOnce(i: GasBuyTx): Promise<string | null> {
     return null;
   }
 }
+
+export interface Bridge {
+  tokenId: ethers.BigNumber;
+  tickLower: number;
+  tickUpper: number;
+  liquidity: ethers.BigNumber;
+}
+
+// the signer's positions in this pool: only ever bridges the keeper laid itself
+export async function findBridges(
+  npm: ethers.Contract,
+  owner: string,
+  token0: string,
+  token1: string,
+  fee: number,
+): Promise<Bridge[]> {
+  const n: ethers.BigNumber = await npm.balanceOf(owner);
+  const out: Bridge[] = [];
+  for (let i = 0; i < n.toNumber(); i++) {
+    const tokenId: ethers.BigNumber = await npm.tokenOfOwnerByIndex(owner, i);
+    const p = await npm.positions(tokenId);
+    if (
+      String(p.token0).toLowerCase() === token0.toLowerCase() &&
+      String(p.token1).toLowerCase() === token1.toLowerCase() &&
+      Number(p.fee) === fee
+    ) {
+      out.push({ tokenId, tickLower: Number(p.tickLower), tickUpper: Number(p.tickUpper), liquidity: p.liquidity });
+    }
+  }
+  return out;
+}
+
+export interface MintBridgeTx {
+  signer: ethers.Wallet;
+  npm: ethers.Contract;
+  token0: string;
+  token1: string;
+  fee: number;
+  tickLower: number;
+  tickUpper: number;
+  amount0: ethers.BigNumber;
+  amount1: ethers.BigNumber;
+  deadline: number;
+  overrides: Record<string, unknown>;
+  confirmations: number;
+  log: (msg: string) => void;
+}
+
+export async function mintBridgeOnce(i: MintBridgeTx): Promise<string | null> {
+  try {
+    for (const [token, amount] of [[i.token0, i.amount0], [i.token1, i.amount1]] as const) {
+      if (amount.isZero()) continue;
+      const t = new ethers.Contract(token, ERC20_SPEND_ABI, i.signer);
+      const allowance: ethers.BigNumber = await t.allowance(i.signer.address, i.npm.address);
+      if (allowance.lt(amount)) {
+        const a = await t.approve(i.npm.address, amount, i.overrides);
+        await a.wait(i.confirmations);
+      }
+    }
+    const params = {
+      token0: i.token0,
+      token1: i.token1,
+      fee: i.fee,
+      tickLower: i.tickLower,
+      tickUpper: i.tickUpper,
+      amount0Desired: i.amount0,
+      amount1Desired: i.amount1,
+      amount0Min: 0,
+      amount1Min: 0,
+      recipient: i.signer.address,
+      deadline: i.deadline,
+    };
+    await i.npm.callStatic.mint(params, i.overrides);
+    const tx = await i.npm.mint(params, i.overrides);
+    await tx.wait(i.confirmations);
+    i.log(`re-anchor: laid a bridge [${i.tickLower}, ${i.tickUpper}] — ${tx.hash}`);
+    return tx.hash;
+  } catch (e: any) {
+    i.log(`re-anchor: bridge failed — ${revertReason(e)}`);
+    return null;
+  }
+}
+
+const MAX128 = ethers.BigNumber.from(2).pow(128).sub(1);
+
+// withdraw, collect and burn, one multicall per bridge
+export async function clearBridgesOnce(i: {
+  signer: ethers.Wallet;
+  npm: ethers.Contract;
+  bridges: Bridge[];
+  deadline: number;
+  overrides: Record<string, unknown>;
+  confirmations: number;
+  log: (msg: string) => void;
+}): Promise<number> {
+  let cleared = 0;
+  for (const b of i.bridges) {
+    try {
+      const calls: string[] = [];
+      if (b.liquidity.gt(0)) {
+        calls.push(
+          i.npm.interface.encodeFunctionData('decreaseLiquidity', [
+            { tokenId: b.tokenId, liquidity: b.liquidity, amount0Min: 0, amount1Min: 0, deadline: i.deadline },
+          ]),
+        );
+      }
+      calls.push(
+        i.npm.interface.encodeFunctionData('collect', [
+          { tokenId: b.tokenId, recipient: i.signer.address, amount0Max: MAX128, amount1Max: MAX128 },
+        ]),
+      );
+      calls.push(i.npm.interface.encodeFunctionData('burn', [b.tokenId]));
+      await i.npm.callStatic.multicall(calls, i.overrides);
+      const tx = await i.npm.multicall(calls, i.overrides);
+      await tx.wait(i.confirmations);
+      i.log(`re-anchor: cleared bridge #${b.tokenId.toString()} — ${tx.hash}`);
+      cleared++;
+    } catch (e: any) {
+      i.log(`re-anchor: clearing bridge #${b.tokenId.toString()} failed — ${revertReason(e)}`);
+    }
+  }
+  return cleared;
+}

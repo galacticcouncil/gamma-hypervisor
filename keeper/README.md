@@ -137,6 +137,7 @@ fire, push the pool price with a large swap, then wait `DWELL_SECS`.
 | `REANCHOR_MAX_TICKS` | `1500` | leave a wider gap to an operator |
 | `REANCHOR_MIN_INTERVAL_SECS` | `3600` | min seconds between re-anchor swaps |
 | `SWAP_ROUTER` / `QUOTER` | Hydration mainnet SwapRouter02 `0x5a79…4159` / QuoterV2 `0x9D7c…9974` | process-wide; startup fails if either does not serve the pool's factory, so set both on other chains |
+| `POSITION_MANAGER` | Hydration mainnet NonfungiblePositionManager `0xd502…10B3` | process-wide; lays the bridge below; checked against the pool's factory like the router |
 | `REANCHOR_GAS_BUY_IN` | `100000000000000` | gas money (raw) to sell for the token when the signer has neither it nor its underlying; `0` = never |
 | `REANCHOR_GAS_ASSET` | `20` | the gas asset (WETH) that buys it |
 | **operations** | | |
@@ -208,8 +209,12 @@ the pool's average catches up, then the keeper re-centers as usual.
   reached the chain starts `REANCHOR_MIN_INTERVAL_SECS`;
 - the token a re-anchor buys back (HOLLAR here) arrives in dust amounts under its ED, so the
   duster sweeps it;
-- SwapRouter02 and QuoterV2 reject a swap that crosses no liquidity at all, so a gap with
-  literally nothing in it is reported (`re-anchor: quote reverted`) and left alone;
+- SwapRouter02 and QuoterV2 reject a swap that crosses no liquidity at all, which is the normal
+  state of a one-sided vault after a rebalance (only its own token, on the far side of spot). On
+  that revert the keeper lays a **bridge**: one tick-spacing of the other token right past spot
+  through `POSITION_MANAGER`, a twentieth of the swap budget at the oracle (bought with gas money
+  when the signer has none), swaps through it on the next block and burns it afterwards. It never
+  lays a second bridge on the path, and clears a stale one off the path first;
 - skipped in the `extreme` regime, on a stale or unreadable feed, and past
   `REANCHOR_MAX_TICKS`.
 

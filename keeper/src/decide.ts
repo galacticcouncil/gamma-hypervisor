@@ -228,6 +228,19 @@ export function shouldReanchor(i: ReanchorInput): ReanchorTrigger {
   };
 }
 
+// one tick-spacing of the other token right past spot, on the side the swap crosses:
+// above spot when the price is pushed up in ticks (selling token1), below when down
+export function bridgeRange(spotTick: number, zeroForOne: boolean, tickSpacing: number): [number, number] {
+  const floor = Math.floor(spotTick / tickSpacing) * tickSpacing;
+  return zeroForOne ? [floor - tickSpacing, floor] : [floor + tickSpacing, floor + 2 * tickSpacing];
+}
+
+// a twentieth of the swap budget, valued at the oracle, in the token the bridge holds
+export function bridgeAmount(capSold: bigint, priceRaw: number, zeroForOne: boolean): bigint {
+  const v = zeroForOne ? Number(capSold) * priceRaw : Number(capSold) / priceRaw;
+  return v > 0 && Number.isFinite(v) ? BigInt(Math.floor(v / 20)) : 0n;
+}
+
 /** Trigger predicate plus the band it would place, centered on `placementTick`. */
 export function decide(i: DecideInput): Decision {
   const [newBaseLower, newBaseUpper] = centeredBand(i.placementTick, i.baseHalfWidthMult, i.tickSpacing);

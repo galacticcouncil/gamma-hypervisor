@@ -1,5 +1,5 @@
 import { ethers } from 'ethers';
-import { AAVE_ORACLE_ABI, AGGREGATOR_V3_ABI, ATOKEN_ABI, MM_SOURCE_ABI, ERC20_ABI, HYPERVISOR_ABI, POOL_ABI, QUOTER_V2_ABI, REBALANCE_PROXY_ABI, SWAP_ROUTER02_ABI } from './abis';
+import { AAVE_ORACLE_ABI, AGGREGATOR_V3_ABI, ATOKEN_ABI, MM_SOURCE_ABI, ERC20_ABI, HYPERVISOR_ABI, POOL_ABI, POSITION_MANAGER_ABI, QUOTER_V2_ABI, REBALANCE_PROXY_ABI, SWAP_ROUTER02_ABI } from './abis';
 import { resolveDwellSecs, type Config, type GlobalConfig } from './config';
 import { blankState, type KeeperState } from './state';
 import { log, logTagged } from './log';
@@ -56,7 +56,13 @@ export interface VaultCtx {
   token1: ethers.Contract;
   proxy?: ethers.Contract; // ENTRYPOINT=proxy (Model B)
   oracle?: { feed0: ethers.Contract | MmFeed; feed1?: ethers.Contract }; // ORACLE_ENABLED
-  reanchor?: { router: ethers.Contract; quoter: ethers.Contract; fee: number; sides: [ReanchorSide, ReanchorSide] }; // REANCHOR_ENABLED
+  reanchor?: {
+    router: ethers.Contract;
+    quoter: ethers.Contract;
+    npm: ethers.Contract;
+    fee: number;
+    sides: [ReanchorSide, ReanchorSide];
+  }; // REANCHOR_ENABLED
   tickSpacing: number;
   decimals0: number;
   decimals1: number;
@@ -190,24 +196,27 @@ export async function createVaultContext(
   if (cfg.REANCHOR_ENABLED) {
     const router = new ethers.Contract(chain.cfg.SWAP_ROUTER, SWAP_ROUTER02_ABI, signer);
     const quoter = new ethers.Contract(chain.cfg.QUOTER, QUOTER_V2_ABI, provider);
-    const [factory, rf, qf, fee] = await Promise.all([
+    const npm = new ethers.Contract(chain.cfg.POSITION_MANAGER, POSITION_MANAGER_ABI, signer);
+    const [factory, rf, qf, nf, fee] = await Promise.all([
       pool.factory(),
       router.factory().catch(() => null),
       quoter.factory().catch(() => null),
+      npm.factory().catch(() => null),
       pool.fee(),
     ]);
     const same = (a: string | null) => !!a && a.toLowerCase() === String(factory).toLowerCase();
-    if (!same(rf) || !same(qf)) {
+    if (!same(rf) || !same(qf) || !same(nf)) {
       throw new Error(
-        `REANCHOR_ENABLED: SWAP_ROUTER ${router.address} (factory ${rf ?? 'unreadable'}) and QUOTER ${quoter.address} ` +
-          `(factory ${qf ?? 'unreadable'}) must serve this pool's factory ${factory} — set them for this chain`,
+        `REANCHOR_ENABLED: SWAP_ROUTER ${router.address} (factory ${rf ?? 'unreadable'}), QUOTER ${quoter.address} ` +
+          `(factory ${qf ?? 'unreadable'}) and POSITION_MANAGER ${npm.address} (factory ${nf ?? 'unreadable'}) ` +
+          `must serve this pool's factory ${factory} — set them for this chain`,
       );
     }
     chain.substrate ??= await connectSubstrate(chain.cfg.RPC_URL);
     const sides = (await Promise.all(
       [token0, token1].map((t) => reanchorSide(chain.substrate!, t, provider, chain.cfg.REANCHOR_GAS_ASSET)),
     )) as [ReanchorSide, ReanchorSide];
-    reanchor = { router, quoter, fee: Number(fee), sides };
+    reanchor = { router, quoter, npm, fee: Number(fee), sides };
   }
 
   const label = cfg.LABEL ?? `${symbol0}/${symbol1}`;

@@ -1,7 +1,7 @@
 import { ethers } from 'ethers';
 import type { Chain, ProxyCaps, VaultCtx } from './chain';
 import { readLastRebalanceTs, readProxyCaps } from './chain';
-import { shouldDeploySeed, shouldFold, shouldReanchor, shouldRebalance, shouldRefreshLimit, type Trigger } from './decide';
+import { bridgeAmount, bridgeRange, shouldDeploySeed, shouldFold, shouldReanchor, shouldRebalance, shouldRefreshLimit, type Trigger } from './decide';
 import { centeredBand, clampBandTranslation, limitRange } from './ticks';
 import { oldestObservationAgeSecs, readSlot0, readTwapTick } from './pool';
 import { readIdleBalances, readPositions, readTotalAmounts, surplusSide } from './vault';
@@ -12,7 +12,7 @@ import { preflight, type RebalanceArgs } from './preflight';
 import { txOverrides } from './chain';
 import { submitRebalance } from './submit';
 import { compoundOnce } from './compound';
-import { buyWithGasOnce, reanchorOnce, wrapOnce } from './reanchor';
+import { buyWithGasOnce, clearBridgesOnce, findBridges, mintBridgeOnce, reanchorOnce, revertReason, wrapOnce, type Bridge } from './reanchor';
 import { routerSellCall } from './substrate';
 import { vaultFees } from './feesOwed';
 import { fetchVolBaseline } from './indexer';
@@ -414,6 +414,88 @@ async function topUp(ctx: VaultCtx, side: 0 | 1, need: ethers.BigNumber): Promis
   return !!(await buyWithGasOnce({ signer, call, overrides, confirmations: cfg.CONFIRMATIONS, log: ctx.log }));
 }
 
+// the router cannot swap across a gap with no liquidity at all, which is the normal state of a
+// one-sided vault: lay one tick-spacing of the other token past spot, swap through it next block,
+// clear it after. true when a tx landed
+async function layBridge(
+  ctx: VaultCtx,
+  zeroForOne: boolean,
+  spotTick: number,
+  oracleTick: number,
+  price: number,
+  capSold: ethers.BigNumber,
+  now: number,
+): Promise<boolean> {
+  const { cfg } = ctx;
+  const { signer } = ctx.chain;
+  const ra = ctx.reanchor!;
+  const onPath = (b: Bridge) =>
+    b.liquidity.gt(0) &&
+    (zeroForOne ? b.tickUpper <= spotTick && b.tickUpper > oracleTick : b.tickLower > spotTick && b.tickLower < oracleTick);
+
+  const existing = await findBridges(ra.npm, signer.address, ctx.token0.address, ctx.token1.address, ra.fee);
+  if (existing.some(onPath)) {
+    ctx.log('re-anchor: a bridge is on the path and the quote still reverts — not laying another');
+    return false;
+  }
+  if (existing.length) {
+    if (cfg.DRY_RUN) return false;
+    const n = await clearBridgesOnce({
+      signer,
+      npm: ra.npm,
+      bridges: existing,
+      deadline: now + 600,
+      overrides: await txOverrides(ctx.chain),
+      confirmations: cfg.CONFIRMATIONS,
+      log: ctx.log,
+    });
+    return n > 0;
+  }
+
+  const [tickLower, tickUpper] = bridgeRange(spotTick, zeroForOne, ctx.tickSpacing);
+  if (zeroForOne ? tickUpper <= oracleTick : tickLower >= oracleTick) {
+    ctx.log(`re-anchor: no room for a bridge between spot ${spotTick} and oracle ${oracleTick}`);
+    return false;
+  }
+  const side: 0 | 1 = zeroForOne ? 1 : 0;
+  const priceRaw = price * Math.pow(10, ctx.decimals1 - ctx.decimals0);
+  const amount = ethers.BigNumber.from(bridgeAmount(BigInt(capSold.toString()), priceRaw, zeroForOne).toString());
+  const token = side === 0 ? ctx.token0 : ctx.token1;
+  const sym = side === 0 ? ctx.symbol0 : ctx.symbol1;
+  if (amount.isZero()) return false;
+  const bal: ethers.BigNumber = await token.balanceOf(signer.address);
+  if (bal.lt(amount)) {
+    if (await topUp(ctx, side, amount.sub(bal))) {
+      ctx.log(`re-anchor: topped up ${sym} for a bridge, laying it next block`);
+      return true;
+    }
+    ctx.log(`re-anchor: empty gap and not enough ${sym} for a bridge — send the signer ${amount.toString()} raw ${sym}`);
+    return false;
+  }
+  if (cfg.DRY_RUN) {
+    ctx.log(`re-anchor: DRY_RUN, would lay a bridge [${tickLower}, ${tickUpper}] of ${amount.toString()} raw ${sym}`);
+    return false;
+  }
+  const hash = await mintBridgeOnce({
+    signer,
+    npm: ra.npm,
+    token0: ctx.token0.address,
+    token1: ctx.token1.address,
+    fee: ra.fee,
+    tickLower,
+    tickUpper,
+    amount0: side === 0 ? amount : ethers.constants.Zero,
+    amount1: side === 1 ? amount : ethers.constants.Zero,
+    deadline: now + 600,
+    overrides: await txOverrides(ctx.chain),
+    confirmations: cfg.CONFIRMATIONS,
+    log: ctx.log,
+  });
+  if (!hash) return false;
+  ctx.log('re-anchor: swapping across the bridge next block');
+  return true;
+}
+
 // walk a stranded pool to the oracle when no arbitrage will; true only when a swap landed
 export async function runReanchor(ctx: VaultCtx, spotTick: number, now: number): Promise<boolean> {
   const { cfg, state } = ctx;
@@ -485,10 +567,13 @@ export async function runReanchor(ctx: VaultCtx, spotTick: number, now: number):
       });
 
     let amountIn = held.lt(cap) ? held : cap;
-    // short of the budget is fine while what it holds still reaches the oracle
+    // short of the budget is fine while what it holds still reaches the oracle; a revert is an
+    // empty gap, which more of the token cannot fix
     if (amountIn.lt(cap)) {
-      const reaches = amountIn.gt(0) && (await quote(amountIn).then((r) => r.sqrtPriceX96After.eq(limit), () => false));
-      if (!reaches && (await topUp(ctx, side, cap.sub(amountIn)))) {
+      const reach = amountIn.gt(0)
+        ? await quote(amountIn).then((r) => (r.sqrtPriceX96After.eq(limit) ? 'reaches' : 'short'), () => 'empty')
+        : 'none';
+      if ((reach === 'short' || reach === 'none') && (await topUp(ctx, side, cap.sub(amountIn)))) {
         // the dwell stays armed: swap on the next block, against settled state
         ctx.log('re-anchor: topped up, swapping next block');
         return false;
@@ -506,7 +591,9 @@ export async function runReanchor(ctx: VaultCtx, spotTick: number, now: number):
     try {
       q = await quote(amountIn);
     } catch (e: any) {
-      ctx.log(`re-anchor: quote reverted (an empty gap cannot be swapped through) — ${e?.reason ?? e?.message ?? e}`);
+      // nothing on the path for the router to cross: lay a dust bridge of the other token first
+      if (await layBridge(ctx, t.zeroForOne, spotTick, o.tick, o.price, cap, now)) return false;
+      ctx.log(`re-anchor: quote reverted — ${revertReason(e)}`);
       return false;
     }
     if (!q.sqrtPriceX96After.eq(limit)) {
@@ -546,6 +633,20 @@ export async function runReanchor(ctx: VaultCtx, spotTick: number, now: number):
     state.reanchorDwellSince = 0;
     const after = await readSlot0(ctx.pool);
     ctx.log(`re-anchor: ✓ spot ${spotTick} -> ${after.tick}, oracle ${o.tick} — ${hash}`);
+    const spent = await findBridges(ctx.reanchor.npm, signer.address, ctx.token0.address, ctx.token1.address, ctx.reanchor.fee).catch(
+      () => [] as Bridge[],
+    );
+    if (spent.length) {
+      await clearBridgesOnce({
+        signer,
+        npm: ctx.reanchor.npm,
+        bridges: spent,
+        deadline: now + 600,
+        overrides: await txOverrides(ctx.chain),
+        confirmations: cfg.CONFIRMATIONS,
+        log: ctx.log,
+      });
+    }
     return true;
   } catch (e: any) {
     ctx.log(`re-anchor: error — ${e?.message ?? e}`);

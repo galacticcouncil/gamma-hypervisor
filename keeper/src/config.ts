@@ -183,9 +183,10 @@ const Env = z
     // a wider gap is a broken feed or a crash, not a stale pool
     REANCHOR_MAX_TICKS: z.coerce.number().int().positive().default(1500),
     REANCHOR_MIN_INTERVAL_SECS: z.coerce.number().int().nonnegative().default(3600),
-    // hydration mainnet SwapRouter02 / QuoterV2; checked against the pool's factory at startup
+    // hydration mainnet SwapRouter02 / QuoterV2 / NonfungiblePositionManager; checked against the pool's factory at startup
     SWAP_ROUTER: addr.default('0x5a79dE848626994c4099640EF5c48Fd65DAe4159'),
     QUOTER: addr.default('0x9D7c18Be9AdD2748784A3c6F9071D67CA8f29974'),
+    POSITION_MANAGER: addr.default('0xd5029E471eE3F6F51feFb63Fed0482A74Bb310B3'),
     // when the signer holds neither the token nor its underlying, buy it with this much
     // gas money (raw) through the runtime router; 0 = never
     REANCHOR_GAS_BUY_IN: z.string().regex(/^\d+$/).default('100000000000000'),
@@ -330,6 +331,7 @@ export const GLOBAL_KEYS = [
   'MM_DATA_PROVIDER',
   'SWAP_ROUTER',
   'QUOTER',
+  'POSITION_MANAGER',
   'REANCHOR_GAS_BUY_IN',
   'REANCHOR_GAS_ASSET',
   'STATUS_PORT',
