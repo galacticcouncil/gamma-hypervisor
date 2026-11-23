@@ -192,6 +192,27 @@ export function shouldFold(i: FoldInput): Trigger {
   };
 }
 
+export interface ReanchorInput {
+  spotTick: number;
+  oracleTick: number;
+  maxDevTicks: number;
+}
+
+export interface ReanchorTrigger extends Trigger {
+  // sell token0: push the price (token1 per token0) down to the oracle
+  zeroForOne: boolean;
+}
+
+export function shouldReanchor(i: ReanchorInput): ReanchorTrigger {
+  const gap = i.oracleTick - i.spotTick;
+  const dist = Math.abs(gap);
+  const zeroForOne = gap < 0;
+  if (dist <= i.maxDevTicks) {
+    return { trigger: false, zeroForOne, reason: `spot ${i.spotTick} within ${dist} ticks of oracle ${i.oracleTick}` };
+  }
+  return { trigger: true, zeroForOne, reason: `spot ${i.spotTick} is ${dist} ticks from oracle ${i.oracleTick} (> ${i.maxDevTicks})` };
+}
+
 /** Trigger predicate plus the band it would place, centered on `placementTick`. */
 export function decide(i: DecideInput): Decision {
   const [newBaseLower, newBaseUpper] = centeredBand(i.placementTick, i.baseHalfWidthMult, i.tickSpacing);

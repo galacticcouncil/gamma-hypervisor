@@ -91,7 +91,7 @@ fire, push the pool price with a large swap, then wait `DWELL_SECS`.
 3. **dwell** — the trigger must hold continuously for `DWELL_SECS`;
 4. **cooldown** — `MIN_INTERVAL_SECS`, and the proxy's on-chain `minInterval`;
 5. **TWAP gate** — window clamped to the pool's actual history; skip if `|spot − TWAP| > MAX_DEV_TICKS`. The TWAP tick becomes the **placement** tick;
-6. **oracle clamp** — skip if the pool disagrees with the price feed by more than `ORACLE_MAX_DEV_TICKS`, or the feed is older than `ORACLE_MAX_AGE_SECS`;
+6. **oracle clamp** — skip if the pool disagrees with the price feed by more than `ORACLE_MAX_DEV_TICKS`, or the feed is older than `ORACLE_MAX_AGE_SECS`; with `REANCHOR_ENABLED`, a gap that has held for the dwell is first anchored closed (see **Re-anchor**);
 7. **gas floor** — skip if the signer's WETH balance is below `GAS_FLOOR_WEI`;
 8. compute the base band around the **placement** tick (`±BASE_HALF_WIDTH_MULT × tickSpacing`), clamped to the proxy's `maxTranslation`; place the limit range one-sided on the surplus token;
 9. derive `inMin`/`outMin` from the current positions and price, less `MINS_TOLERANCE_BPS`;
@@ -131,6 +131,13 @@ fire, push the pool price with a large swap, then wait `DWELL_SECS`.
 | `ORACLE_FEED0` / `ORACLE_FEED1` | — | Chainlink AggregatorV3 **addresses**, one per pair; omit `FEED1` if token1 is the USD side. `FEED0` may instead be the MM's `AaveOracle` (see below) |
 | `ORACLE_MAX_AGE_SECS` | `600` | reject staler feeds |
 | `ORACLE_MAX_DEV_TICKS` | `200` | max pool-vs-oracle deviation (~2%) |
+| **re-anchor** | | |
+| `REANCHOR_ENABLED` | `false` | move a stranded pool back to the oracle; see below |
+| `POOL_ANCHOR` | — | process-wide; the deployed `contracts/PoolAnchor.sol`, required with `REANCHOR_ENABLED` |
+| `REANCHOR_MAX_USD` | `10` | dollars the keeper may sell per re-anchor, converted at the feed price |
+| `REANCHOR_MAX_IN0` / `REANCHOR_MAX_IN1` | — | raw units of the token sold, in place of `REANCHOR_MAX_USD` for that side; `0` never sells it |
+| `REANCHOR_MIN_INTERVAL_SECS` | `3600` | min seconds between re-anchors that reached the chain |
+| `REANCHOR_XCHECK_MAX_BPS` | `200` | max gap between the Omnipool price and the feed before a re-anchor |
 | **operations** | | |
 | `GAS_FLOOR_WEI` | `0` | skip if signer WETH-gas balance below this |
 | `GAS_LIMIT` | `3000000` | rebalance gas limit |
@@ -170,6 +177,46 @@ detected once at startup; anything that is neither a feed nor an `AaveOracle` fa
 The DIA legs run on the same slow cadence as DOT's (GETH/GSOL read 37-50 min old), so
 use the deploy's `ORACLE_MAX_AGE_SECS=28800`; 600s skips nearly every rebalance.
 `npm run smoke` prints the resolved asset, source and age leg.
+
+### Re-anchor (`REANCHOR_ENABLED`)
+
+The oracle clamp assumes arbitrage pulls the pool to the market. It does not when the
+side the price has to cross is empty: a vault that sold all of one token on the way down
+leaves no bid, so nobody earns anything by walking the price through it, spot stays put,
+and the clamp blocks every rebalance, refresh and compound until the market comes back
+on its own. atBTC/HOLLAR sat like that for most of 13 to 21 Nov 2026, 200-800 ticks off.
+
+With re-anchor on, once spot has sat more than `ORACLE_MAX_DEV_TICKS` from a fresh
+oracle for the dwell, the keeper calls `PoolAnchor.anchor`: one `pool.swap` whose price
+limit is the oracle price, selling at most the budget of the token that pushes spot toward
+it. Across empty ticks the pool moves for free, so an empty gap costs nothing; liquidity on
+the way is paid for, at the oracle price or better less the fee. If the budget runs out
+first the call reverts and the pool does not move. After the swap the TWAP gate holds the
+rebalance until the pool average catches up, then the keeper re-centers as usual.
+
+- SwapRouter02 and QuoterV2 refuse a swap that crosses no liquidity
+  (`require(amount0Delta > 0 || amount1Delta > 0)`), the normal state of a one-sided vault
+  after a rebalance, and also a price sitting exactly on a range edge. `UniswapV3Pool.swap`
+  has no such check, so the contract swaps the pool directly and pays its own callback;
+- the callback only pays the pool it is swapping, only from the caller of that swap; the keeper
+  approves it for the cap. An aToken transfer can credit one wei short at the current index; the
+  contract tops the pool up until it holds what it is owed;
+- the budget is `REANCHOR_MAX_USD` at the feed price (`REANCHOR_MAX_IN0/1` override a side).
+  The signer needs that much of each token; it buys nothing by itself;
+- before every re-anchor the feed is checked against the Omnipool: both tokens' Omnipool
+  prices (an aToken that is not listed is priced by its underlying) must agree with the feed
+  within `REANCHOR_XCHECK_MAX_BPS`. A disagreement, a token the Omnipool cannot price, or an
+  unreadable read skips the re-anchor, so one bad feed print cannot set the pool price;
+- a preflight that reverts costs nothing and is retried on the next sample; only an anchor
+  that reached the chain starts `REANCHOR_MIN_INTERVAL_SECS`;
+- the oracle is sampled every 30s, armed or not, and the regime is refreshed right before acting.
+  A failed oracle read keeps the dwell; a feed unreadable for longer than the dwell resets it.
+  `npm run once` arms a re-anchor too, which makes it the manual tool for a stuck pool;
+- skipped in the `extreme` regime and on a stale or unreadable feed.
+
+Deploy `contracts/PoolAnchor.sol` once per chain (no constructor arguments, no owner) and set
+`POOL_ANCHOR`. Startup fails if it does not answer as a PoolAnchor, or if the Omnipool cannot
+price both tokens.
 
 ### Fold at balance (`FOLD_ENABLED`)
 

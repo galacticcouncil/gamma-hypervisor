@@ -80,3 +80,14 @@ export const MM_SOURCE_ABI = [
 ];
 
 export const ATOKEN_ABI = ['function UNDERLYING_ASSET_ADDRESS() view returns (address)'];
+
+export const ERC20_SPEND_ABI = [
+  'function balanceOf(address) view returns (uint256)',
+  'function allowance(address owner, address spender) view returns (uint256)',
+  'function approve(address spender, uint256 amount) returns (bool)',
+];
+
+// contracts/PoolAnchor.sol: one swap with the price limit at the target, reverts when the cap falls short
+export const POOL_ANCHOR_ABI = [
+  'function anchor(address pool, uint160 target, uint256 max0, uint256 max1) returns (int256 amount0, int256 amount1)',
+];

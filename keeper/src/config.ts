@@ -175,6 +175,19 @@ const Env = z
     // a different role from the rebalancer the proxy holds.
     ADMIN_ADDRESS: addr.optional(),
 
+    // --- re-anchor (see the README) ---
+    REANCHOR_ENABLED: boolEnv(false),
+    // dollars the keeper may sell per re-anchor, converted at the feed price; every fill is at the feed price or better
+    REANCHOR_MAX_USD: z.coerce.number().nonnegative().default(10),
+    // raw units of the token sold, per side, in place of REANCHOR_MAX_USD; 0 never sells that side
+    REANCHOR_MAX_IN0: z.string().regex(/^\d+$/).optional(),
+    REANCHOR_MAX_IN1: z.string().regex(/^\d+$/).optional(),
+    REANCHOR_MIN_INTERVAL_SECS: z.coerce.number().int().nonnegative().default(3600),
+    // the Omnipool must agree with the feed within this before the keeper moves the pool to the feed
+    REANCHOR_XCHECK_MAX_BPS: z.coerce.number().int().positive().default(200),
+    // contracts/PoolAnchor.sol, one per chain
+    POOL_ANCHOR: addr.optional(),
+
     GAS_FLOOR_WEI: z.string().regex(/^\d+$/).default('0'),
     GAS_LIMIT: z.coerce.number().int().positive().default(3_000_000),
     // Markup over the chain's own eth_gasPrice quote, in percent.
@@ -237,6 +250,16 @@ const Env = z
         message: 'COMPOUND_ENABLED needs ADMIN_ADDRESS — compound is Admin.compound, not a vault call',
       });
     }
+    if (e.REANCHOR_ENABLED) {
+      const need = (path: string, message: string) =>
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: [path], message });
+      if (!e.ORACLE_ENABLED) need('ORACLE_ENABLED', 'REANCHOR_ENABLED needs the oracle: it is the target');
+      if (!e.POOL_ANCHOR) need('POOL_ANCHOR', 'REANCHOR_ENABLED needs the PoolAnchor contract address');
+      const raw = (v?: string) => (v === undefined ? e.REANCHOR_MAX_USD > 0 : BigInt(v) > 0n);
+      if (!raw(e.REANCHOR_MAX_IN0) && !raw(e.REANCHOR_MAX_IN1)) {
+        need('REANCHOR_MAX_USD', 'REANCHOR_ENABLED with no budget on either side would never act');
+      }
+    }
     if (e.REGIME_ENABLED && !e.MM_DATA_PROVIDER) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
@@ -273,6 +296,8 @@ const Env = z
 export type Config = z.infer<typeof Env> & {
   gasFloorWei: ethers.BigNumber;
   compoundMinFees1: ethers.BigNumber;
+  reanchorMaxIn0?: ethers.BigNumber;
+  reanchorMaxIn1?: ethers.BigNumber;
 };
 
 // ---------------------------------------------------------------------------
@@ -299,6 +324,7 @@ export const GLOBAL_KEYS = [
   'INDEXER_URL',
   'INDEXER_TIMEOUT_MS',
   'MM_DATA_PROVIDER',
+  'POOL_ANCHOR',
   'STATUS_PORT',
   'STATUS_HOST',
   'STATUS_RING',
@@ -354,6 +380,12 @@ export const VAULT_KEYS = [
   'COMPOUND_ENABLED',
   'COMPOUND_MIN_FEES1',
   'COMPOUND_INTERVAL_SECS',
+  'REANCHOR_ENABLED',
+  'REANCHOR_MAX_USD',
+  'REANCHOR_MAX_IN0',
+  'REANCHOR_MAX_IN1',
+  'REANCHOR_MIN_INTERVAL_SECS',
+  'REANCHOR_XCHECK_MAX_BPS',
   'LABEL',
 ] as const;
 
@@ -474,6 +506,8 @@ function parseVault(raw: RawEnv, where: string): Config {
     ...e,
     gasFloorWei: ethers.BigNumber.from(e.GAS_FLOOR_WEI),
     compoundMinFees1: ethers.BigNumber.from(e.COMPOUND_MIN_FEES1),
+    reanchorMaxIn0: e.REANCHOR_MAX_IN0 === undefined ? undefined : ethers.BigNumber.from(e.REANCHOR_MAX_IN0),
+    reanchorMaxIn1: e.REANCHOR_MAX_IN1 === undefined ? undefined : ethers.BigNumber.from(e.REANCHOR_MAX_IN1),
   };
 }
 

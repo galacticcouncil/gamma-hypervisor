@@ -1,9 +1,12 @@
 import { ethers } from 'ethers';
-import { AAVE_ORACLE_ABI, AGGREGATOR_V3_ABI, ATOKEN_ABI, MM_SOURCE_ABI, ERC20_ABI, HYPERVISOR_ABI, POOL_ABI, REBALANCE_PROXY_ABI } from './abis';
+import { AAVE_ORACLE_ABI, AGGREGATOR_V3_ABI, ATOKEN_ABI, MM_SOURCE_ABI, ERC20_ABI, HYPERVISOR_ABI, POOL_ABI, POOL_ANCHOR_ABI, REBALANCE_PROXY_ABI } from './abis';
 import { resolveDwellSecs, type Config, type GlobalConfig } from './config';
 import { blankState, type KeeperState } from './state';
 import { log, logTagged } from './log';
 import type { MmFeed } from './oracle';
+import type { ApiPromise } from '@polkadot/api';
+import { revertReason, xcheckAsset } from './reanchor';
+import { connectSubstrate } from './substrate';
 
 /**
  * The process-wide half: one RPC connection, one signer, one nonce.
@@ -16,6 +19,8 @@ export interface Chain {
   cfg: GlobalConfig;
   provider: ethers.providers.JsonRpcProvider;
   signer: ethers.Wallet;
+  // the Omnipool reads behind the re-anchor cross-check
+  substrate?: ApiPromise;
 }
 
 /** What validateRoles found at startup; served by the status listener. */
@@ -43,6 +48,11 @@ export interface VaultCtx {
   token1: ethers.Contract;
   proxy?: ethers.Contract; // ENTRYPOINT=proxy (Model B)
   oracle?: { feed0: ethers.Contract | MmFeed; feed1?: ethers.Contract }; // ORACLE_ENABLED
+  reanchor?: {
+    anchor: ethers.Contract;
+    // the Omnipool assets that price token0 and token1
+    xcheck: [number, number];
+  }; // REANCHOR_ENABLED
   tickSpacing: number;
   decimals0: number;
   decimals1: number;
@@ -172,6 +182,29 @@ export async function createVaultContext(
       }
     : undefined;
 
+  let reanchor: VaultCtx['reanchor'];
+  if (cfg.REANCHOR_ENABLED) {
+    const at = chain.cfg.POOL_ANCHOR!;
+    const anchor = new ethers.Contract(at, POOL_ANCHOR_ABI, signer);
+    // a PoolAnchor answers an anchor to the current price with (0, 0) and moves nothing
+    const blockTag = await provider.getBlockNumber();
+    try {
+      const { sqrtPriceX96 } = await pool.slot0({ blockTag });
+      await anchor.callStatic.anchor(pool.address, sqrtPriceX96, 0, 0, { blockTag });
+    } catch (e: any) {
+      throw new Error(`REANCHOR_ENABLED: POOL_ANCHOR ${at} does not answer as a PoolAnchor (${revertReason(e)})`);
+    }
+    chain.substrate ??= await connectSubstrate(chain.cfg.RPC_URL);
+    const ids = [
+      await xcheckAsset(chain.substrate, token0, provider),
+      await xcheckAsset(chain.substrate, token1, provider),
+    ];
+    if (ids[0] === null || ids[1] === null) {
+      throw new Error(`REANCHOR_ENABLED: the Omnipool cannot price ${ids[0] === null ? symbol0 : symbol1}, the cross-check would block every re-anchor`);
+    }
+    reanchor = { anchor, xcheck: [ids[0], ids[1]] };
+  }
+
   const label = cfg.LABEL ?? `${symbol0}/${symbol1}`;
   const ctx: VaultCtx = {
     chain,
@@ -184,6 +217,7 @@ export async function createVaultContext(
     token1: t1,
     proxy,
     oracle,
+    reanchor,
     tickSpacing,
     decimals0,
     decimals1,
