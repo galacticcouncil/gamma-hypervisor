@@ -6,6 +6,9 @@ export interface OracleReading {
   ageSecs: number;
   /** The human price behind the tick — token1 per token0. Used by the regime checks. */
   price: number;
+  /** Each token in USD; the side without a feed is the USD-pegged one, at 1. Sizes the re-anchor budget. */
+  usd0: number;
+  usd1: number;
 }
 
 export interface OracleInput {
@@ -96,19 +99,17 @@ export const isMmFeed = (f: ethers.Contract | MmFeed): f is MmFeed => (f as MmFe
 export async function readOracleTick(o: OracleInput): Promise<OracleReading> {
   const a = isMmFeed(o.feed0) ? await readMmFeed(o.feed0) : await readFeed(o.feed0);
 
-  // token1 per token0, in human units.
-  let priceHuman: number;
   let oldestTs = a.ts;
+  // One feed: the unpriced side is USD-pegged, so its price is 1.
+  let other = 1;
   if (o.feed1) {
     const b = await readFeed(o.feed1);
-    // Two feeds: the ratio is oriented by which feed is which side.
-    const [num, den] = o.feed0Side === 'token0' ? [a.usd, b.usd] : [b.usd, a.usd];
-    priceHuman = num / den;
+    other = b.usd;
     oldestTs = Math.min(oldestTs, b.ts);
-  } else {
-    // One feed: the unpriced side is USD-pegged, so its price is 1.
-    priceHuman = o.feed0Side === 'token0' ? a.usd : 1 / a.usd;
   }
+  // the ratio is oriented by which feed is which side; token1 per token0, in human units
+  const [usd0, usd1] = o.feed0Side === 'token0' ? [a.usd, other] : [other, a.usd];
+  const priceHuman = usd0 / usd1;
   if (!(priceHuman > 0) || !Number.isFinite(priceHuman)) {
     throw new Error(`oracle price not usable: ${priceHuman}`);
   }
@@ -119,5 +120,7 @@ export async function readOracleTick(o: OracleInput): Promise<OracleReading> {
     tick: tickFromPrice(priceRaw),
     ageSecs: Math.max(0, o.nowTs - oldestTs),
     price: priceHuman,
+    usd0,
+    usd1,
   };
 }

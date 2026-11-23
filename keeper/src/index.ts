@@ -84,22 +84,12 @@ function vaultBanner(ctx: VaultCtx, blockTimeSecs: number): void {
   ctx.log(
     `  re-anchor    ${
       cfg.REANCHOR_ENABLED
-        ? `on — swap spot to the oracle past ${cfg.ORACLE_MAX_DEV_TICKS} ticks (max ${cfg.REANCHOR_MAX_TICKS}), ` +
-          `budget ${cfg.REANCHOR_MAX_IN0}/${cfg.REANCHOR_MAX_IN1} raw, >=${cfg.REANCHOR_MIN_INTERVAL_SECS}s apart`
+        ? `on, anchor spot to the oracle past ${cfg.ORACLE_MAX_DEV_TICKS} ticks via ${cfg.POOL_ANCHOR}, ` +
+          `budget ${cfg.REANCHOR_MAX_IN0 ?? `$${cfg.REANCHOR_MAX_USD}`}/${cfg.REANCHOR_MAX_IN1 ?? `$${cfg.REANCHOR_MAX_USD}`}, ` +
+          `Omnipool within ${cfg.REANCHOR_XCHECK_MAX_BPS} bps, >=${cfg.REANCHOR_MIN_INTERVAL_SECS}s apart`
         : 'off'
     }`,
   );
-  if (ctx.reanchor) {
-    ctx.reanchor.sides.forEach((s, i) => {
-      const sym = i === 0 ? ctx.symbol0 : ctx.symbol1;
-      ctx.log(
-        `    ${sym}: asset ${s.assetId ?? '?'}, ED ${s.ed?.toString() ?? '?'}` +
-          `${s.wrap ? `, wraps ${s.wrap.underlying.address}` : ''}` +
-          `${s.gasRoute ? `, gas route from asset ${cfg.REANCHOR_GAS_ASSET}` : ', no gas route'}` +
-          `${s.unresolved ? ' (a lookup failed, retried hourly)' : ''}`,
-      );
-    });
-  }
   ctx.log(`  compound     ${cfg.COMPOUND_ENABLED ? `every ${cfg.COMPOUND_INTERVAL_SECS}s via Admin ${cfg.ADMIN_ADDRESS}, bounded` : 'off'}`);
 
   // Loud on purpose. DWELL_BLOCKS silently meant a different length of time

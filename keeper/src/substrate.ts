@@ -1,25 +1,21 @@
 import { ApiPromise, HttpProvider, WsProvider } from '@polkadot/api';
-import { ethers } from 'ethers';
 
-export const DISPATCH_PRECOMPILE = '0x0000000000000000000000000000000000000401';
 const ASSET_PREFIX = '0x0000000000000000000000000000000100000000';
+// "modlomnipool" padded to 32 bytes: the account that holds every Omnipool reserve
+const OMNIPOOL_ACCOUNT = '0x6d6f646c6f6d6e69706f6f6c0000000000000000000000000000000000000000';
 
 export async function connectSubstrate(rpcUrl: string): Promise<ApiPromise> {
   const provider = rpcUrl.startsWith('ws') ? new WsProvider(rpcUrl) : new HttpProvider(rpcUrl);
   return ApiPromise.create({ provider, noInitWarn: true, throwOnConnect: true });
 }
 
-// http has no runtime-upgrade subscription, so metadata is checked against the chain before encoding
+// http has no runtime-upgrade subscription, so metadata is checked against the chain before use
 export async function freshSubstrate(api: ApiPromise, reconnect: () => Promise<ApiPromise>): Promise<ApiPromise> {
   const live = await api.rpc.state.getRuntimeVersion();
   if (live.specVersion.eq(api.runtimeVersion.specVersion)) return api;
   const next = await reconnect();
   await api.disconnect().catch(() => {});
   return next;
-}
-
-export function assetPrecompile(id: number): string {
-  return ASSET_PREFIX.slice(0, 34) + id.toString(16).padStart(8, '0');
 }
 
 export function precompileAssetId(address: string): number | null {
@@ -39,27 +35,22 @@ export async function assetIdOf(api: ApiPromise, address: string): Promise<numbe
   return typeof v === 'number' ? v : null;
 }
 
-export async function existentialDeposit(api: ApiPromise, id: number): Promise<ethers.BigNumber> {
-  const a = (await api.query.assetRegistry.assets(id)).toJSON() as { existentialDeposit?: string | number } | null;
-  if (!a || a.existentialDeposit === undefined) throw new Error(`asset ${id} is not registered`);
-  return ethers.BigNumber.from(BigInt(a.existentialDeposit).toString());
+export async function inOmnipool(api: ApiPromise, id: number): Promise<boolean> {
+  return !((await api.query.omnipool.assets(id)) as any).isNone;
 }
 
-export async function hasStoredRoute(api: ApiPromise, assetIn: number, assetOut: number): Promise<boolean> {
-  const [f, r] = await Promise.all([
-    api.query.router.routes({ assetIn, assetOut }),
-    api.query.router.routes({ assetIn: assetOut, assetOut: assetIn }),
+// the Omnipool spot price of the asset in LRNA, human units; throws when it is not in the Omnipool
+export async function omnipoolLrnaPrice(api: ApiPromise, id: number): Promise<number> {
+  const [state, account, meta] = await Promise.all([
+    api.query.omnipool.assets(id),
+    (api.call as any).currenciesApi.account(id, OMNIPOOL_ACCOUNT),
+    api.query.assetRegistry.assets(id),
   ]);
-  return !(f as any).isNone || !(r as any).isNone;
-}
-
-// an empty route makes the router use its stored route for the pair
-export function routerSellCall(
-  api: ApiPromise,
-  assetIn: number,
-  assetOut: number,
-  amountIn: ethers.BigNumber,
-  minOut: ethers.BigNumber,
-): string {
-  return api.tx.router.sell(assetIn, assetOut, amountIn.toString(), minOut.toString(), []).method.toHex();
+  if ((state as any).isNone) throw new Error(`asset ${id} is not in the Omnipool`);
+  const hub = Number((state as any).unwrap().hubReserve.toString()) / 1e12;
+  const decimals = Number((meta.toJSON() as { decimals?: number } | null)?.decimals);
+  if (!Number.isInteger(decimals)) throw new Error(`asset ${id} has no decimals in the registry`);
+  const reserve = Number(account.free.toString()) / Math.pow(10, decimals);
+  if (!(hub > 0 && reserve > 0)) throw new Error(`asset ${id} has an empty Omnipool reserve`);
+  return hub / reserve;
 }

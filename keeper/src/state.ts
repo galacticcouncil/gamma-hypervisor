@@ -19,11 +19,11 @@ export interface KeeperState {
   refreshDwellSince: number;
   /** Same, for the fold-at-balance trigger. */
   foldDwellSince: number;
+  /** Same, for the re-anchor trigger; then when the last anchor was sent, the last oracle sample and the last good read. */
   reanchorDwellSince: number;
   lastReanchorTs: number;
-  lastReanchorActionTs: number;
   lastReanchorCheckTs: number;
-  bridgeIds: string[];
+  lastReanchorReadTs: number;
   /** Volatility regime, and when it was entered. */
   regime: RegimeState;
   /** Feed price trail, for the "moved X% in Y minutes" checks. */
@@ -42,9 +42,8 @@ export function blankState(): KeeperState {
     foldDwellSince: 0,
     reanchorDwellSince: 0,
     lastReanchorTs: 0,
-    lastReanchorActionTs: 0,
     lastReanchorCheckTs: 0,
-    bridgeIds: [],
+    lastReanchorReadTs: 0,
     // Start calm rather than extreme: the first evaluation re-derives it from
     // live inputs anyway, and booting into `extreme` would impose the full
     // re-entry wait on every restart.

@@ -1,12 +1,12 @@
 import { ethers } from 'ethers';
-import { AAVE_ORACLE_ABI, AGGREGATOR_V3_ABI, ATOKEN_ABI, MM_SOURCE_ABI, ERC20_ABI, HYPERVISOR_ABI, POOL_ABI, POSITION_MANAGER_ABI, QUOTER_V2_ABI, REBALANCE_PROXY_ABI, SWAP_ROUTER02_ABI } from './abis';
+import { AAVE_ORACLE_ABI, AGGREGATOR_V3_ABI, ATOKEN_ABI, MM_SOURCE_ABI, ERC20_ABI, HYPERVISOR_ABI, POOL_ABI, POOL_ANCHOR_ABI, REBALANCE_PROXY_ABI } from './abis';
 import { resolveDwellSecs, type Config, type GlobalConfig } from './config';
 import { blankState, type KeeperState } from './state';
 import { log, logTagged } from './log';
 import type { MmFeed } from './oracle';
 import type { ApiPromise } from '@polkadot/api';
-import { assetIdOf, connectSubstrate, existentialDeposit, hasStoredRoute } from './substrate';
-import { isRevert } from './reanchor';
+import { revertReason, xcheckAsset } from './reanchor';
+import { connectSubstrate } from './substrate';
 
 /**
  * The process-wide half: one RPC connection, one signer, one nonce.
@@ -19,20 +19,8 @@ export interface Chain {
   cfg: GlobalConfig;
   provider: ethers.providers.JsonRpcProvider;
   signer: ethers.Wallet;
+  // the Omnipool reads behind the re-anchor cross-check
   substrate?: ApiPromise;
-  // timestamps of re-anchor gas buys, for the daily cap across every vault on this signer
-  gasBuys?: number[];
-}
-
-export interface ReanchorSide {
-  assetId: number | null;
-  ed: ethers.BigNumber | null;
-  wrap?: { pool: string; underlying: ethers.Contract; underlyingEd: ethers.BigNumber | null };
-  // the runtime router has a stored route from the gas asset to this token
-  gasRoute: boolean;
-  // a lookup failed for a reason other than a revert; re-resolved at most hourly
-  unresolved: boolean;
-  resolvedAt: number;
 }
 
 /** What validateRoles found at startup; served by the status listener. */
@@ -61,11 +49,9 @@ export interface VaultCtx {
   proxy?: ethers.Contract; // ENTRYPOINT=proxy (Model B)
   oracle?: { feed0: ethers.Contract | MmFeed; feed1?: ethers.Contract }; // ORACLE_ENABLED
   reanchor?: {
-    router: ethers.Contract;
-    quoter: ethers.Contract;
-    npm: ethers.Contract;
-    fee: number;
-    sides: [ReanchorSide, ReanchorSide];
+    anchor: ethers.Contract;
+    // the Omnipool assets that price token0 and token1
+    xcheck: [number, number];
   }; // REANCHOR_ENABLED
   tickSpacing: number;
   decimals0: number;
@@ -86,7 +72,7 @@ export function createChain(cfg: GlobalConfig): Chain {
   const provider = new ethers.providers.JsonRpcProvider(cfg.RPC_URL);
   provider.pollingInterval = cfg.POLL_INTERVAL_MS;
   const signer = new ethers.Wallet(cfg.PRIVATE_KEY, provider);
-  return { cfg, provider, signer, gasBuys: [] };
+  return { cfg, provider, signer };
 }
 
 /**
@@ -198,29 +184,25 @@ export async function createVaultContext(
 
   let reanchor: VaultCtx['reanchor'];
   if (cfg.REANCHOR_ENABLED) {
-    const router = new ethers.Contract(chain.cfg.SWAP_ROUTER, SWAP_ROUTER02_ABI, signer);
-    const quoter = new ethers.Contract(chain.cfg.QUOTER, QUOTER_V2_ABI, provider);
-    const npm = new ethers.Contract(chain.cfg.POSITION_MANAGER, POSITION_MANAGER_ABI, signer);
-    const [factory, rf, qf, nf, fee] = await Promise.all([
-      pool.factory(),
-      router.factory().catch(() => null),
-      quoter.factory().catch(() => null),
-      npm.factory().catch(() => null),
-      pool.fee(),
-    ]);
-    const same = (a: string | null) => !!a && a.toLowerCase() === String(factory).toLowerCase();
-    if (!same(rf) || !same(qf) || !same(nf)) {
-      throw new Error(
-        `REANCHOR_ENABLED: SWAP_ROUTER ${router.address} (factory ${rf ?? 'unreadable'}), QUOTER ${quoter.address} ` +
-          `(factory ${qf ?? 'unreadable'}) and POSITION_MANAGER ${npm.address} (factory ${nf ?? 'unreadable'}) ` +
-          `must serve this pool's factory ${factory} — set them for this chain`,
-      );
+    const at = chain.cfg.POOL_ANCHOR!;
+    const anchor = new ethers.Contract(at, POOL_ANCHOR_ABI, signer);
+    // a PoolAnchor answers an anchor to the current price with (0, 0) and moves nothing
+    const blockTag = await provider.getBlockNumber();
+    try {
+      const { sqrtPriceX96 } = await pool.slot0({ blockTag });
+      await anchor.callStatic.anchor(pool.address, sqrtPriceX96, 0, 0, { blockTag });
+    } catch (e: any) {
+      throw new Error(`REANCHOR_ENABLED: POOL_ANCHOR ${at} does not answer as a PoolAnchor (${revertReason(e)})`);
     }
     chain.substrate ??= await connectSubstrate(chain.cfg.RPC_URL);
-    const sides = (await Promise.all(
-      [token0, token1].map((t) => resolveReanchorSide(chain.substrate!, t, provider, chain.cfg.REANCHOR_GAS_ASSET)),
-    )) as [ReanchorSide, ReanchorSide];
-    reanchor = { router, quoter, npm, fee: Number(fee), sides };
+    const ids = [
+      await xcheckAsset(chain.substrate, token0, provider),
+      await xcheckAsset(chain.substrate, token1, provider),
+    ];
+    if (ids[0] === null || ids[1] === null) {
+      throw new Error(`REANCHOR_ENABLED: the Omnipool cannot price ${ids[0] === null ? symbol0 : symbol1}, the cross-check would block every re-anchor`);
+    }
+    reanchor = { anchor, xcheck: [ids[0], ids[1]] };
   }
 
   const label = cfg.LABEL ?? `${symbol0}/${symbol1}`;
@@ -250,40 +232,6 @@ export async function createVaultContext(
     log: (msg: string) => logTagged(ctx.tag, msg),
   };
   return ctx;
-}
-
-export async function resolveReanchorSide(
-  api: ApiPromise,
-  token: string,
-  provider: ethers.providers.Provider,
-  gasAsset: number,
-): Promise<ReanchorSide> {
-  let unresolved = false;
-  const soft = <T>(p: Promise<T>, fallback: T): Promise<T> =>
-    p.catch(() => {
-      unresolved = true;
-      return fallback;
-    });
-  // a revert means "not an aToken"; anything else is a lookup to retry
-  const aToken = (f: string): Promise<string | null> =>
-    new ethers.Contract(token, ATOKEN_ABI, provider)[f]().catch((e: any) => {
-      if (!isRevert(e)) unresolved = true;
-      return null;
-    });
-  const assetId = await soft(assetIdOf(api, token), null);
-  const ed = assetId !== null ? await soft(existentialDeposit(api, assetId), null) : null;
-  const [underlying, pool] = await Promise.all([aToken('UNDERLYING_ASSET_ADDRESS'), aToken('POOL')]);
-  let wrap: ReanchorSide['wrap'];
-  if (underlying && pool) {
-    const uid = await soft(assetIdOf(api, underlying), null);
-    wrap = {
-      pool,
-      underlying: new ethers.Contract(underlying, ERC20_ABI, provider),
-      underlyingEd: uid !== null ? await soft(existentialDeposit(api, uid), null) : null,
-    };
-  }
-  const gasRoute = assetId !== null && assetId !== gasAsset && (await soft(hasStoredRoute(api, gasAsset, assetId), false));
-  return { assetId, ed, wrap, gasRoute, unresolved, resolvedAt: Math.floor(Date.now() / 1000) };
 }
 
 /**

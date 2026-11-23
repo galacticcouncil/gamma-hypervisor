@@ -1,24 +1,22 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { GLOBAL_KEYS, VAULT_KEYS, loadConfig, loadKeeperConfig } from '../src/config';
-import { bridgeAmount, bridgeRange, shouldReanchor } from '../src/decide';
-import { runReanchor } from '../src/keeper';
+import { shouldReanchor } from '../src/decide';
+import { reanchorCap, runReanchor } from '../src/keeper';
 import { priceFromSqrtX96, sqrtPriceFromTick, sqrtX96FromPrice, tickFromPrice } from '../src/price';
 import { blankState } from '../src/state';
 import { freshSubstrate, precompileAssetId } from '../src/substrate';
 import type { VaultCtx } from '../src/chain';
-import { buyWithGasOnce, clearBridgesOnce, findBridges, mintBridgeOnce, reanchorOnce, wrapOnce } from '../src/reanchor';
+import { anchorOnce, omnipoolPrice } from '../src/reanchor';
+
+const C = vi.hoisted(() => ({ BTC_USD: 58940.89270066 }));
 
 vi.mock('../src/moneyMarket', () => ({ isReservePaused: vi.fn(async () => true) }));
 
 vi.mock('../src/reanchor', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../src/reanchor')>()),
-  reanchorOnce: vi.fn(async () => ({ sent: true, ok: true, hash: '0x' + 'ab'.repeat(32) })),
-  wrapOnce: vi.fn(async () => ({ sent: true, ok: true })),
-  buyWithGasOnce: vi.fn(async () => ({ sent: true, ok: true })),
-  findBridges: vi.fn(async () => []),
-  mintBridgeOnce: vi.fn(async () => ({ sent: true, minted: { hash: '0x' + '12'.repeat(32), tokenId: '3' } })),
-  clearBridgesOnce: vi.fn(async (i: any) => ({ sent: true, cleared: i.bridges.map((b: any) => b.tokenId.toString()) })),
+  anchorOnce: vi.fn(async () => ({ sent: true, anchored: true, ok: true, short: false, hash: '0x' + 'ab'.repeat(32) })),
+  omnipoolPrice: vi.fn(async () => 1 / C.BTC_USD),
 }));
 
 const reverted = (reason: string) =>
@@ -32,19 +30,19 @@ const timedOut = () =>
 const KEY = '0x' + '11'.repeat(32);
 const VAULT = '0x' + 'aa'.repeat(20);
 const FEED = '0x' + 'bb'.repeat(20);
-const ROUTER = '0x' + 'cc'.repeat(20);
-const QUOTER = '0x' + 'dd'.repeat(20);
+const ANCHOR = '0x' + 'cc'.repeat(20);
+const POOL = '0x' + 'dd'.repeat(20);
 const TREASURY = '0x' + 'ee'.repeat(20);
 const HOLLAR = '0x' + '01'.repeat(20);
 const ATBTC = '0x' + '02'.repeat(20);
 const SIGNER = '0x' + '03'.repeat(20);
 const TBTC = '0x00000000000000000000000000000001000f453d';
-const MM_POOL = '0x' + '04'.repeat(20);
 
 const BN = ethers.BigNumber.from;
 const NOW = 1_795_000_000;
-const BTC_USD = 58940.89270066;
+const BTC_USD = C.BTC_USD;
 const ORACLE_TICK = tickFromPrice(1 / BTC_USD);
+const TEN_USD_OF_BTC = Math.floor((10 / BTC_USD) * 1e18);
 
 let saved: NodeJS.ProcessEnv;
 
@@ -63,10 +61,7 @@ beforeEach(() => {
     ORACLE_MAX_AGE_SECS: '43200',
     ORACLE_MAX_DEV_TICKS: '200',
     REANCHOR_ENABLED: 'true',
-    REANCHOR_MAX_IN0: '1000000000000000000',
-    REANCHOR_MAX_IN1: '10000000000000',
-    SWAP_ROUTER: ROUTER,
-    QUOTER,
+    POOL_ANCHOR: ANCHOR,
   });
 });
 
@@ -75,8 +70,7 @@ afterEach(() => {
 });
 
 describe('shouldReanchor', () => {
-  const at = (spotTick: number, oracleTick: number) =>
-    shouldReanchor({ spotTick, oracleTick, maxDevTicks: 200, maxTicks: 1500 });
+  const at = (spotTick: number, oracleTick: number) => shouldReanchor({ spotTick, oracleTick, maxDevTicks: 200 });
 
   it('leaves a gap the oracle clamp tolerates alone', () => {
     expect(at(-110298, -110100).trigger).toBe(false);
@@ -95,10 +89,8 @@ describe('shouldReanchor', () => {
     expect(t.zeroForOne).toBe(true);
   });
 
-  it('does not chase a gap past REANCHOR_MAX_TICKS', () => {
-    const t = at(-110298, -108000);
-    expect(t.trigger).toBe(false);
-    expect(t.tooFar).toBe(true);
+  it('still fires on a pool pushed thousands of ticks away', () => {
+    expect(at(887271, -110298).trigger).toBe(true);
   });
 });
 
@@ -117,120 +109,90 @@ describe('sqrtX96FromPrice', () => {
 });
 
 describe('re-anchor config', () => {
-  it('parses the budgets into BigNumbers', () => {
+  it('budgets $10 a side by default, with no raw caps', () => {
     const cfg = loadConfig();
-    expect(cfg.reanchorMaxIn0.toString()).toBe('1000000000000000000');
-    expect(cfg.reanchorMaxIn1.toString()).toBe('10000000000000');
+    expect(cfg.REANCHOR_MAX_USD).toBe(10);
+    expect(cfg.reanchorMaxIn0).toBeUndefined();
+    expect(cfg.reanchorMaxIn1).toBeUndefined();
+    expect(cfg.REANCHOR_XCHECK_MAX_BPS).toBe(200);
   });
 
-  it('needs the oracle and a budget', () => {
+  it('parses raw caps into BigNumbers', () => {
+    Object.assign(process.env, { REANCHOR_MAX_IN0: '1000000000000000000', REANCHOR_MAX_IN1: '0' });
+    const cfg = loadConfig();
+    expect(cfg.reanchorMaxIn0!.toString()).toBe('1000000000000000000');
+    expect(cfg.reanchorMaxIn1!.isZero()).toBe(true);
+  });
+
+  it('needs the oracle, the anchor and a budget', () => {
     process.env.ORACLE_ENABLED = 'false';
     expect(() => loadConfig()).toThrow(/ORACLE_ENABLED/);
     process.env.ORACLE_ENABLED = 'true';
-    process.env.REANCHOR_MAX_IN0 = '0';
-    process.env.REANCHOR_MAX_IN1 = '0';
+    delete process.env.POOL_ANCHOR;
+    expect(() => loadConfig()).toThrow(/POOL_ANCHOR/);
+    process.env.POOL_ANCHOR = ANCHOR;
+    process.env.REANCHOR_MAX_USD = '0';
     expect(() => loadConfig()).toThrow(/budget/);
+    process.env.REANCHOR_MAX_IN1 = '10000000000000';
+    expect(() => loadConfig()).not.toThrow();
   });
 
-  it('must reach past the oracle clamp', () => {
-    process.env.REANCHOR_MAX_TICKS = '200';
-    expect(() => loadConfig()).toThrow(/REANCHOR_MAX_TICKS/);
-  });
-
-  it('defaults the router and quoter to hydration mainnet', () => {
-    delete process.env.SWAP_ROUTER;
-    delete process.env.QUOTER;
-    const cfg = loadConfig();
-    expect(cfg.SWAP_ROUTER).toBe('0x5a79dE848626994c4099640EF5c48Fd65DAe4159');
-    expect(cfg.QUOTER).toBe('0x9D7c18Be9AdD2748784A3c6F9071D67CA8f29974');
-  });
-
-  it('keeps the router and quoter process-wide', () => {
-    process.env.VAULTS_JSON = JSON.stringify([{ VAULT, SWAP_ROUTER: ROUTER }]);
+  it('keeps the anchor address process-wide', () => {
+    process.env.VAULTS_JSON = JSON.stringify([{ VAULT, POOL_ANCHOR: ANCHOR }]);
     expect(() => loadKeeperConfig()).toThrow(/GLOBAL/);
   });
 
   it('is off by default and asks for nothing then', () => {
-    for (const k of ['REANCHOR_ENABLED', 'SWAP_ROUTER', 'QUOTER', 'REANCHOR_MAX_IN0', 'REANCHOR_MAX_IN1']) delete process.env[k];
+    for (const k of ['REANCHOR_ENABLED', 'POOL_ANCHOR']) delete process.env[k];
     expect(loadConfig().REANCHOR_ENABLED).toBe(false);
   });
 });
 
-describe('runReanchor', () => {
-  const CAP = BN('10000000000000');
-  const TBTC_ED = BN('106803374987');
+describe('reanchorCap', () => {
+  const ctx = () => ({ cfg: loadConfig(), decimals0: 18, decimals1: 18 }) as unknown as VaultCtx;
+  const o = { tick: ORACLE_TICK, ageSecs: 60, price: 1 / BTC_USD, usd0: 1, usd1: BTC_USD };
 
-  function harness(o: {
-    dryRun?: boolean;
-    feedAgeSecs?: number;
-    usd?: number;
-    held1?: ethers.BigNumber[];
-    underlying?: ethers.BigNumber;
-    underlyingAddr?: string;
-    gas?: ethers.BigNumber;
-    reach?: boolean | 'revert' | 'rpcfail';
-    held0?: ethers.BigNumber;
-    activeLiquidity?: ethers.BigNumber;
-    dwellSecs?: number;
-  } = {}) {
+  it('is $10 of the token sold at the feed price', () => {
+    expect(Number(reanchorCap(ctx(), 1, o).toString())).toBeCloseTo(TEN_USD_OF_BTC, -4);
+    expect(reanchorCap(ctx(), 0, o).toString()).toBe('10000000000000000000');
+  });
+
+  it('takes a raw cap over the dollar budget, and 0 never sells that side', () => {
+    Object.assign(process.env, { REANCHOR_MAX_IN1: '10000000000000', REANCHOR_MAX_IN0: '0' });
+    expect(reanchorCap(ctx(), 1, o).toString()).toBe('10000000000000');
+    expect(reanchorCap(ctx(), 0, o).isZero()).toBe(true);
+  });
+});
+
+describe('runReanchor', () => {
+  function harness(
+    o: { dryRun?: boolean; feedAgeSecs?: number; gas?: ethers.BigNumber; dwellSecs?: number; feedFails?: number; held1?: ethers.BigNumber } = {},
+  ) {
     if (o.dryRun) process.env.DRY_RUN = 'true';
     const cfg = loadConfig();
     const lines: string[] = [];
-    const quote = vi.fn(async (p: any) => {
-      if (o.reach === 'revert') throw reverted('Unexpected error');
-      if (o.reach === 'rpcfail') throw timedOut();
-      return {
-        amountOut: BN('1612571438082522'),
-        sqrtPriceX96After: o.reach === false ? BN(p.sqrtPriceLimitX96).sub(1_000_000_000) : BN(p.sqrtPriceLimitX96),
-      };
+    let fails = o.feedFails ?? 0;
+    const feedRead = vi.fn(async () => {
+      if (fails-- > 0) throw timedOut();
+      return { answer: BN(Math.round(BTC_USD * 1e8)), updatedAt: BN(NOW - (o.feedAgeSecs ?? 60)) };
     });
-    const sell = vi.fn((..._args: unknown[]) => ({ method: { toHex: () => '0xd15a' } }));
-    const feedRead = vi.fn();
-    // successive balanceOf reads walk the list, the last value sticks
-    const held1 = [...(o.held1 ?? [BN('20000000000000')])];
-    const usd = o.usd ?? BTC_USD;
+    const api = {
+      rpc: { state: { getRuntimeVersion: async () => ({ specVersion: { eq: () => true } }) } },
+      runtimeVersion: { specVersion: 1 },
+    };
     const ctx = {
       cfg,
       chain: {
         cfg,
         provider: { getBalance: async () => o.gas ?? BN('10000000000000000'), send: async () => '0x1' },
         signer: { address: SIGNER },
-        substrate: {
-          tx: { router: { sell } },
-          rpc: { state: { getRuntimeVersion: async () => ({ specVersion: { eq: () => true } }) } },
-          runtimeVersion: { specVersion: 1 },
-        },
+        substrate: api,
       },
-      oracle: {
-        feed0: {
-          address: FEED,
-          decimals: async () => 8,
-          latestRoundData: feedRead.mockImplementation(async () => ({
-            answer: BN(Math.round(usd * 1e8)),
-            updatedAt: BN(NOW - (o.feedAgeSecs ?? 60)),
-          })),
-        },
-      },
-      reanchor: {
-        quoter: { callStatic: { quoteExactInputSingle: quote } },
-        router: { address: ROUTER },
-        npm: { address: '0x' + '05'.repeat(20) },
-        fee: 3000,
-        sides: [
-          { assetId: 222, ed: BN('20000000000000000'), gasRoute: true, unresolved: false, resolvedAt: NOW },
-          {
-            assetId: 1006,
-            ed: BN('208779411374'),
-            wrap: { pool: MM_POOL, underlying: { address: o.underlyingAddr ?? TBTC, balanceOf: async () => o.underlying ?? BN(0) }, underlyingEd: TBTC_ED },
-            gasRoute: true,
-            unresolved: false,
-            resolvedAt: NOW,
-          },
-        ],
-      },
-      pool: { slot0: async () => ({ sqrtPriceX96: BN(1), tick: -109849 }), liquidity: async () => o.activeLiquidity ?? BN(0) },
-      token0: { address: HOLLAR, balanceOf: async () => o.held0 ?? BN(0) },
-      token1: { address: ATBTC, balanceOf: async () => (held1.length > 1 ? held1.shift()! : held1[0]) },
+      oracle: { feed0: { address: FEED, decimals: async () => 8, latestRoundData: feedRead } },
+      reanchor: { anchor: { address: ANCHOR }, xcheck: [222, 1000765] },
+      pool: { address: POOL, slot0: async () => ({ sqrtPriceX96: BN(1), tick: -109849 }) },
+      token0: { address: HOLLAR, balanceOf: async () => BN(0) },
+      token1: { address: ATBTC, balanceOf: async () => o.held1 ?? BN(0) },
       symbol0: 'HOLLAR',
       symbol1: 'atBTC',
       tickSpacing: 60,
@@ -240,126 +202,96 @@ describe('runReanchor', () => {
       state: blankState(),
       log: (m: string) => lines.push(m.trim()),
     } as unknown as VaultCtx;
-    return { ctx, lines, quote, sell, feedRead };
+    return { ctx, lines, feedRead };
   }
 
   const SPOT = -110298;
+  const sent = () => vi.mocked(anchorOnce).mock.calls[0][0];
 
   beforeEach(() => {
-    vi.mocked(reanchorOnce).mockClear();
-    vi.mocked(wrapOnce).mockClear();
-    vi.mocked(buyWithGasOnce).mockClear();
-    vi.mocked(findBridges).mockClear();
-    vi.mocked(mintBridgeOnce).mockClear();
-    vi.mocked(clearBridgesOnce).mockClear();
+    vi.mocked(anchorOnce).mockClear();
+    vi.mocked(omnipoolPrice).mockClear();
   });
 
-  it('lays a dust HOLLAR bridge one spacing past spot when the gap is empty, then swaps next block', async () => {
-    const h = harness({ reach: 'revert', held0: BN('1000000000000000000') });
+  it('anchors to the oracle price, capped at $10 of the token it sells', async () => {
+    const h = harness();
     expect(await runReanchor(h.ctx, SPOT, NOW)).toBe(true);
-    const m = vi.mocked(mintBridgeOnce).mock.calls[0][0];
-    expect([m.tickLower, m.tickUpper]).toEqual([-110280, -110220]);
-    expect(Number(m.amount0.toString())).toBeCloseTo((1e13 * BTC_USD) / 20, -6);
-    expect(m.amount1.isZero()).toBe(true);
-    expect(reanchorOnce).not.toHaveBeenCalled();
-    expect(h.lines.some((l) => l.includes('swapping across the bridge next block'))).toBe(true);
+    const a = sent();
+    expect(a.pool).toBe(POOL);
+    expect(a.tokenIn).toBe(ATBTC);
+    expect(a.max0.isZero()).toBe(true);
+    expect(Number(a.max1.toString())).toBeCloseTo(TEN_USD_OF_BTC, -4);
+    expect(a.target.eq(sqrtX96FromPrice(1 / BTC_USD))).toBe(true);
+    expect(tickFromPrice(priceFromSqrtX96(a.target))).toBe(ORACLE_TICK);
+    expect(h.ctx.state.lastReanchorTs).toBe(NOW);
+    expect(h.ctx.state.reanchorDwellSince).toBe(0);
+    expect(h.lines.some((l) => l.startsWith('re-anchor: ✓ spot -110298 -> -109849'))).toBe(true);
   });
 
-  it('buys HOLLAR with gas money for the bridge when it has none', async () => {
-    const h = harness({ reach: 'revert' });
-    expect(await runReanchor(h.ctx, SPOT, NOW)).toBe(true);
-    expect(mintBridgeOnce).not.toHaveBeenCalled();
-    expect(h.sell).toHaveBeenCalledWith(20, 222, '100000000000000', '20000000000000000', []);
-    expect(h.lines.some((l) => l.includes('topped up HOLLAR for a bridge'))).toBe(true);
+  it('sells HOLLAR when the pool sits above the oracle in tick terms', async () => {
+    const h = harness();
+    expect(await runReanchor(h.ctx, ORACLE_TICK + 400, NOW)).toBe(true);
+    expect(sent().tokenIn).toBe(HOLLAR);
+    expect(sent().max0.toString()).toBe('10000000000000000000');
+    expect(sent().max1.isZero()).toBe(true);
   });
 
-  it('does not lay a second bridge on the path', async () => {
-    vi.mocked(findBridges).mockResolvedValueOnce([{ tokenId: BN(7), tickLower: -110280, tickUpper: -110220, liquidity: BN(5) }]);
-    const h = harness({ reach: 'revert', held0: BN('1000000000000000000') });
-    h.ctx.state.bridgeIds = ['7'];
+  it('anchors a pool pushed thousands of ticks away', async () => {
+    const h = harness();
+    expect(await runReanchor(h.ctx, ORACLE_TICK - 5000, NOW)).toBe(true);
+    expect(anchorOnce).toHaveBeenCalledTimes(1);
+  });
+
+  it('only plans in DRY_RUN', async () => {
+    const h = harness({ dryRun: true });
     expect(await runReanchor(h.ctx, SPOT, NOW)).toBe(false);
-    expect(mintBridgeOnce).not.toHaveBeenCalled();
-    expect(clearBridgesOnce).not.toHaveBeenCalled();
-    expect(h.lines.some((l) => l.includes('still reverts'))).toBe(true);
+    expect(anchorOnce).not.toHaveBeenCalled();
+    expect(h.lines.some((l) => l.startsWith('re-anchor: DRY_RUN, not sending'))).toBe(true);
   });
 
-  it('clears a stale bridge off the path before laying a new one', async () => {
-    vi.mocked(findBridges).mockResolvedValueOnce([{ tokenId: BN(7), tickLower: -110400, tickUpper: -110340, liquidity: BN(5) }]);
-    const h = harness({ reach: 'revert', held0: BN('1000000000000000000') });
-    h.ctx.state.bridgeIds = ['7'];
-    expect(await runReanchor(h.ctx, SPOT, NOW)).toBe(true);
-    expect(vi.mocked(clearBridgesOnce).mock.calls[0][0].bridges.map((b: any) => b.tokenId.toNumber())).toEqual([7]);
-    expect(mintBridgeOnce).not.toHaveBeenCalled();
-    expect(h.ctx.state.bridgeIds).toEqual([]);
-  });
-
-  it('only ever looks at bridges it laid itself', async () => {
-    const h = harness({ reach: 'revert', held0: BN('1000000000000000000') });
+  it('waits out the dwell before it trades', async () => {
+    const h = harness({ dwellSecs: 600 });
     await runReanchor(h.ctx, SPOT, NOW);
-    expect(vi.mocked(findBridges).mock.calls[0][1]).toEqual([]);
-    expect(h.ctx.state.bridgeIds).toEqual(['3']);
+    expect(anchorOnce).not.toHaveBeenCalled();
+    expect(h.lines.some((l) => l.startsWith('arming re-anchor'))).toBe(true);
+    await runReanchor(h.ctx, SPOT, NOW + 600);
+    expect(anchorOnce).toHaveBeenCalledTimes(1);
   });
 
-  it('retries an rpc failure instead of bridging it', async () => {
-    const h = harness({ reach: 'rpcfail', held0: BN('1000000000000000000') });
-    expect(await runReanchor(h.ctx, SPOT, NOW)).toBe(false);
-    expect(mintBridgeOnce).not.toHaveBeenCalled();
-    expect(buyWithGasOnce).not.toHaveBeenCalled();
-    expect(h.lines.some((l) => l.includes('quote failed, retrying next block'))).toBe(true);
+  it('keeps the dwell through a failed oracle read', async () => {
+    const h = harness({ dwellSecs: 600, feedFails: 1 });
+    Object.assign(h.ctx.state, { reanchorDwellSince: NOW, lastReanchorReadTs: NOW });
+    await runReanchor(h.ctx, SPOT, NOW + 300);
+    expect(h.ctx.state.reanchorDwellSince).toBe(NOW);
+    await runReanchor(h.ctx, SPOT, NOW + 600);
+    expect(anchorOnce).toHaveBeenCalledTimes(1);
   });
 
-  it('does not call a revert with liquidity at spot an empty gap', async () => {
-    const h = harness({ reach: 'revert', held0: BN('1000000000000000000'), activeLiquidity: BN(5) });
-    expect(await runReanchor(h.ctx, SPOT, NOW)).toBe(false);
-    expect(mintBridgeOnce).not.toHaveBeenCalled();
+  it('resets the dwell once the feed has been unreadable for longer than the dwell', async () => {
+    const h = harness({ dwellSecs: 600, feedFails: 1 });
+    Object.assign(h.ctx.state, { reanchorDwellSince: NOW, lastReanchorReadTs: NOW });
+    await runReanchor(h.ctx, SPOT, NOW + 700);
+    expect(h.ctx.state.reanchorDwellSince).toBe(0);
+    expect(anchorOnce).not.toHaveBeenCalled();
   });
 
-  it('spaces spend actions by REANCHOR_ACTION_INTERVAL_SECS', async () => {
-    const h = harness({ reach: 'revert', held0: BN('1000000000000000000') });
-    h.ctx.state.lastReanchorActionTs = NOW - 30;
-    expect(await runReanchor(h.ctx, SPOT, NOW)).toBe(false);
-    expect(mintBridgeOnce).not.toHaveBeenCalled();
-    expect(h.lines.some((l) => l === 're-anchor: next action in 90s')).toBe(true);
-  });
-
-  it('caps gas buys per day across the signer', async () => {
-    const h = harness({ reach: 'revert' });
-    (h.ctx.chain as any).gasBuys = Array.from({ length: 6 }, (_, i) => NOW - 1000 + i);
-    expect(await runReanchor(h.ctx, SPOT, NOW)).toBe(false);
-    expect(buyWithGasOnce).not.toHaveBeenCalled();
-    expect(h.lines.some((l) => l.includes('gas buys in 24h'))).toBe(true);
-  });
-
-  it('buys with gas money in the same block when the supply fails its preflight', async () => {
-    vi.mocked(wrapOnce).mockResolvedValueOnce({ sent: false, ok: false });
-    const h = harness({ held1: [BN(0)], underlying: BN('103650801406404') });
-    expect(await runReanchor(h.ctx, SPOT, NOW)).toBe(true);
-    expect(wrapOnce).toHaveBeenCalledTimes(1);
-    expect(buyWithGasOnce).toHaveBeenCalledTimes(1);
-  });
-
-  it('does not count a gas buy that failed its preflight', async () => {
-    vi.mocked(buyWithGasOnce).mockResolvedValueOnce({ sent: false, ok: false });
-    const h = harness({ held1: [BN(0)] });
-    expect(await runReanchor(h.ctx, SPOT, NOW)).toBe(false);
-    expect((h.ctx.chain as any).gasBuys).toEqual([]);
-    expect(h.ctx.state.lastReanchorActionTs).toBe(0);
-  });
-
-  it('buys nothing when even the full budget falls short of the oracle', async () => {
-    const h = harness({ reach: false, held1: [BN(0)], underlying: BN('103650801406404') });
-    expect(await runReanchor(h.ctx, SPOT, NOW)).toBe(false);
-    expect(wrapOnce).not.toHaveBeenCalled();
-    expect(buyWithGasOnce).not.toHaveBeenCalled();
-    expect(h.lines.some((l) => l.includes('leaving it to arbitrage'))).toBe(true);
-  });
-
-  it('never wraps gas money below the floor', async () => {
-    process.env.GAS_FLOOR_WEI = '1000000000000000';
-    const weth = '0x0000000000000000000000000000000100000014';
-    const h = harness({ held1: [BN(0)], underlying: BN('1005000000000000'), underlyingAddr: weth });
+  it('retries an armed re-anchor that cannot complete on the next sample, not every block', async () => {
+    vi.mocked(anchorOnce).mockResolvedValue({ sent: false, anchored: false, ok: false, short: true, hash: null });
+    const h = harness();
     await runReanchor(h.ctx, SPOT, NOW);
-    expect(vi.mocked(wrapOnce).mock.calls[0][0].amount.toString()).toBe('5000000000000');
+    await runReanchor(h.ctx, SPOT, NOW + 2);
+    expect(anchorOnce).toHaveBeenCalledTimes(1);
+    await runReanchor(h.ctx, SPOT, NOW + 31);
+    expect(anchorOnce).toHaveBeenCalledTimes(2);
+    vi.mocked(anchorOnce).mockReset();
+    vi.mocked(anchorOnce).mockResolvedValue({ sent: true, anchored: true, ok: true, short: false, hash: '0x' + 'ab'.repeat(32) });
+  });
+
+  it('asks for funding when the preflight fails and the signer holds less than the cap', async () => {
+    vi.mocked(anchorOnce).mockResolvedValueOnce({ sent: false, anchored: false, ok: false, short: false, hash: null });
+    const h = harness({ held1: BN(1000) });
+    expect(await runReanchor(h.ctx, SPOT, NOW)).toBe(false);
+    expect(h.lines.some((l) => l.includes(`holds 1000 of the`) && l.includes('raw atBTC budget, fund it'))).toBe(true);
   });
 
   it('samples the oracle every 30s until the dwell is armed', async () => {
@@ -371,198 +303,186 @@ describe('runReanchor', () => {
     expect(h.feedRead).toHaveBeenCalledTimes(2);
   });
 
-  it('takes a leftover bridge back once nothing needs it', async () => {
-    const left = { tokenId: BN(5), tickLower: -110280, tickUpper: -110220, liquidity: BN(5) };
-    vi.mocked(findBridges).mockResolvedValueOnce([left]);
-    const h = harness({ dryRun: false });
-    h.ctx.state.bridgeIds = ['5'];
-    expect(await runReanchor(h.ctx, ORACLE_TICK - 150, NOW)).toBe(true);
-    expect(vi.mocked(clearBridgesOnce).mock.calls[0][0].bridges).toEqual([left]);
-    expect(h.ctx.state.bridgeIds).toEqual([]);
-  });
-
-  it('clears its bridges after the swap lands', async () => {
-    const bridge = { tokenId: BN(9), tickLower: -109740, tickUpper: -109680, liquidity: BN(0) };
-    vi.mocked(findBridges).mockResolvedValueOnce([bridge]);
-    const h = harness();
-    h.ctx.state.bridgeIds = ['9'];
-    expect(await runReanchor(h.ctx, SPOT, NOW)).toBe(true);
-    expect(vi.mocked(clearBridgesOnce).mock.calls[0][0].bridges).toEqual([bridge]);
-  });
-
-  it('does not top up the swap token for an empty gap', async () => {
-    const h = harness({ reach: 'revert', held1: [BN('5000000000000')], held0: BN('1000000000000000000'), underlying: BN('103650801406404') });
-    await runReanchor(h.ctx, SPOT, NOW);
-    expect(wrapOnce).not.toHaveBeenCalled();
-    expect(mintBridgeOnce).toHaveBeenCalledTimes(1);
-  });
-
-  it('plans a capped sell of atBTC with its limit at the oracle price', async () => {
-    const h = harness({ dryRun: true });
-    expect(await runReanchor(h.ctx, SPOT, NOW)).toBe(false);
-    expect(h.quote).toHaveBeenCalledTimes(1);
-    const p = h.quote.mock.calls[0][0];
-    expect(p.tokenIn).toBe(ATBTC);
-    expect(p.tokenOut).toBe(HOLLAR);
-    expect(p.fee).toBe(3000);
-    expect(p.amountIn.toString()).toBe(CAP.toString());
-    expect(p.sqrtPriceLimitX96.eq(sqrtX96FromPrice(1 / BTC_USD))).toBe(true);
-    expect(tickFromPrice(priceFromSqrtX96(p.sqrtPriceLimitX96))).toBe(ORACLE_TICK);
-    expect(h.lines.some((l) => l.startsWith('re-anchor: DRY_RUN, not sending'))).toBe(true);
-    expect(reanchorOnce).not.toHaveBeenCalled();
-  });
-
-  it('swaps live, capped at the budget', async () => {
-    const h = harness();
-    expect(await runReanchor(h.ctx, SPOT, NOW)).toBe(true);
-    expect(vi.mocked(reanchorOnce).mock.calls[0][0].amountIn.toString()).toBe(CAP.toString());
-    expect(h.ctx.state.lastReanchorTs).toBe(NOW);
-    expect(h.lines.some((l) => l.startsWith('re-anchor: ✓ spot -110298 -> -109849'))).toBe(true);
-  });
-
-  it('waits out the dwell before it trades', async () => {
-    const h = harness({ dryRun: true, dwellSecs: 600 });
-    await runReanchor(h.ctx, SPOT, NOW);
-    expect(h.quote).not.toHaveBeenCalled();
-    expect(h.lines.some((l) => l.startsWith('arming re-anchor'))).toBe(true);
-    await runReanchor(h.ctx, SPOT, NOW + 600);
-    expect(h.quote).toHaveBeenCalledTimes(1);
-  });
-
-  it('leaves a gap with real liquidity in it to arbitrage', async () => {
-    const h = harness({ reach: false });
-    expect(await runReanchor(h.ctx, SPOT, NOW)).toBe(false);
-    expect(h.lines.some((l) => l.includes('leaving it to arbitrage'))).toBe(true);
-    expect(reanchorOnce).not.toHaveBeenCalled();
-  });
-
-  it('sells a short balance as is when it still reaches the oracle', async () => {
-    const h = harness({ held1: [BN('5000000000000')] });
-    expect(await runReanchor(h.ctx, SPOT, NOW)).toBe(true);
-    expect(wrapOnce).not.toHaveBeenCalled();
-    expect(buyWithGasOnce).not.toHaveBeenCalled();
-    expect(vi.mocked(reanchorOnce).mock.calls[0][0].amountIn.toString()).toBe('5000000000000');
-  });
-
-  it('supplies the underlying it holds, then sells the aToken on the next block', async () => {
-    const h = harness({ held1: [BN(0), CAP], underlying: BN('103650801406404') });
-    expect(await runReanchor(h.ctx, SPOT, NOW)).toBe(true);
-    const w = vi.mocked(wrapOnce).mock.calls[0][0];
-    expect(w.underlying).toBe(TBTC);
-    expect(w.pool).toBe(MM_POOL);
-    expect(w.amount.toString()).toBe(CAP.toString());
-    expect(buyWithGasOnce).not.toHaveBeenCalled();
-    expect(reanchorOnce).not.toHaveBeenCalled();
-    expect(h.ctx.state.lastReanchorTs).toBe(0);
-    expect(await runReanchor(h.ctx, SPOT, NOW + 2)).toBe(true);
-    expect(vi.mocked(reanchorOnce).mock.calls[0][0].amountIn.toString()).toBe(CAP.toString());
-    expect(vi.mocked(reanchorOnce).mock.calls[0][0].approve.toString()).toBe(CAP.toString());
-  });
-
-  it('supplies all of the underlying rather than leave the duster a remainder', async () => {
-    const all = CAP.add(50_000_000_000);
-    const h = harness({ held1: [BN(0)], underlying: all });
-    await runReanchor(h.ctx, SPOT, NOW);
-    expect(vi.mocked(wrapOnce).mock.calls[0][0].amount.toString()).toBe(all.toString());
-  });
-
-  it('buys with gas money when there is nothing to supply, asking at least the ED', async () => {
-    const h = harness({ held1: [BN(0), BN('3000000000000')] });
-    expect(await runReanchor(h.ctx, SPOT, NOW)).toBe(true);
-    expect(wrapOnce).not.toHaveBeenCalled();
-    expect(h.sell).toHaveBeenCalledWith(20, 1006, '100000000000000', '208779411374', []);
-    expect(vi.mocked(buyWithGasOnce).mock.calls[0][0].call).toBe('0xd15a');
-    expect(await runReanchor(h.ctx, SPOT, NOW + 2)).toBe(true);
-    expect(vi.mocked(reanchorOnce).mock.calls[0][0].amountIn.toString()).toBe('3000000000000');
-  });
-
-  it('retries next block after a preflight revert, but backs off after a sent swap fails', async () => {
-    const h = harness();
-    vi.mocked(reanchorOnce).mockResolvedValueOnce({ sent: false, ok: false, hash: null });
-    expect(await runReanchor(h.ctx, SPOT, NOW)).toBe(false);
-    expect(h.ctx.state.lastReanchorTs).toBe(0);
-    vi.mocked(reanchorOnce).mockResolvedValueOnce({ sent: true, ok: false, hash: '0x01' });
-    expect(await runReanchor(h.ctx, SPOT, NOW + 2)).toBe(true);
-    expect(h.ctx.state.lastReanchorTs).toBe(NOW + 2);
-  });
-
-  it('keeps the gas floor', async () => {
-    process.env.GAS_FLOOR_WEI = '1000000000000000';
-    const h = harness({ held1: [BN(0)], gas: BN('1050000000000000') });
-    expect(await runReanchor(h.ctx, SPOT, NOW)).toBe(false);
-    expect(buyWithGasOnce).not.toHaveBeenCalled();
-    expect(h.lines.some((l) => l.includes('too low to buy with'))).toBe(true);
-    expect(h.lines.some((l) => l.includes('could not get any'))).toBe(true);
-  });
-
-  it('never buys when REANCHOR_GAS_BUY_IN is 0', async () => {
-    process.env.REANCHOR_GAS_BUY_IN = '0';
-    const h = harness({ held1: [BN(0)] });
-    expect(await runReanchor(h.ctx, SPOT, NOW)).toBe(false);
-    expect(buyWithGasOnce).not.toHaveBeenCalled();
-  });
-
-  it('asks for funding when it holds none and cannot get any', async () => {
-    process.env.REANCHOR_GAS_BUY_IN = '0';
-    const h = harness({ held1: [BN(0)] });
-    expect(await runReanchor(h.ctx, SPOT, NOW)).toBe(false);
-    expect(h.lines.some((l) => l.includes('holds no atBTC and could not get any'))).toBe(true);
-  });
-
-  it('only plans the top-up in DRY_RUN', async () => {
-    const h = harness({ dryRun: true, held1: [BN(0)], underlying: BN('103650801406404') });
-    expect(await runReanchor(h.ctx, SPOT, NOW)).toBe(false);
-    expect(wrapOnce).not.toHaveBeenCalled();
-    expect(h.lines.some((l) => l.startsWith('re-anchor: DRY_RUN, would supply 10000000000000'))).toBe(true);
-  });
-
   it('does nothing while spot is within the clamp', async () => {
-    const h = harness({ dryRun: true });
+    const h = harness();
     expect(await runReanchor(h.ctx, ORACLE_TICK - 150, NOW)).toBe(false);
-    expect(h.quote).not.toHaveBeenCalled();
+    expect(anchorOnce).not.toHaveBeenCalled();
     expect(h.lines).toEqual([]);
   });
 
   it('never targets a stale feed', async () => {
-    const h = harness({ dryRun: true, feedAgeSecs: 50_000 });
+    const h = harness({ feedAgeSecs: 50_000 });
     expect(await runReanchor(h.ctx, SPOT, NOW)).toBe(false);
-    expect(h.quote).not.toHaveBeenCalled();
+    expect(anchorOnce).not.toHaveBeenCalled();
   });
 
-  it('says so, and stays put, when the gap is too wide to be a stale pool', async () => {
-    const h = harness({ dryRun: true });
-    expect(await runReanchor(h.ctx, ORACLE_TICK - 2000, NOW)).toBe(false);
-    expect(h.quote).not.toHaveBeenCalled();
-    expect(h.lines.some((l) => l.includes('not chasing it'))).toBe(true);
+  it('skips when the Omnipool disagrees with the feed', async () => {
+    vi.mocked(omnipoolPrice).mockResolvedValueOnce(1 / (BTC_USD * 1.05));
+    const h = harness();
+    expect(await runReanchor(h.ctx, SPOT, NOW)).toBe(false);
+    expect(anchorOnce).not.toHaveBeenCalled();
+    expect(h.lines.some((l) => l.includes('feed and Omnipool disagree by'))).toBe(true);
+  });
+
+  it('acts when the Omnipool agrees within the limit', async () => {
+    vi.mocked(omnipoolPrice).mockResolvedValueOnce(1 / (BTC_USD * 1.015));
+    const h = harness();
+    expect(await runReanchor(h.ctx, SPOT, NOW)).toBe(true);
+  });
+
+  it('skips when the cross-check cannot be read', async () => {
+    vi.mocked(omnipoolPrice).mockRejectedValueOnce(new Error('ws closed'));
+    const h = harness();
+    expect(await runReanchor(h.ctx, SPOT, NOW)).toBe(false);
+    expect(anchorOnce).not.toHaveBeenCalled();
+    expect(h.lines.some((l) => l.includes('cross-check unreadable (ws closed)'))).toBe(true);
+  });
+
+  it('leaves a gap holding more than the budget, without starting the interval', async () => {
+    vi.mocked(anchorOnce).mockResolvedValueOnce({ sent: false, anchored: false, ok: false, short: true, hash: null });
+    const h = harness();
+    expect(await runReanchor(h.ctx, SPOT, NOW)).toBe(false);
+    expect(h.ctx.state.lastReanchorTs).toBe(0);
+    expect(h.lines.some((l) => l.includes('does not reach the oracle'))).toBe(true);
+  });
+
+  it('retries after a preflight revert, but backs off after a sent anchor fails', async () => {
+    const h = harness();
+    vi.mocked(anchorOnce).mockResolvedValueOnce({ sent: false, anchored: false, ok: false, short: false, hash: null });
+    expect(await runReanchor(h.ctx, SPOT, NOW)).toBe(false);
+    expect(h.ctx.state.lastReanchorTs).toBe(0);
+    vi.mocked(anchorOnce).mockResolvedValueOnce({ sent: true, anchored: true, ok: false, short: false, hash: '0x01' });
+    expect(await runReanchor(h.ctx, SPOT, NOW + 31)).toBe(true);
+    expect(h.ctx.state.lastReanchorTs).toBe(NOW + 31);
+  });
+
+  it('counts an approve that reached the chain as acting, without starting the interval', async () => {
+    vi.mocked(anchorOnce).mockResolvedValueOnce({ sent: true, anchored: false, ok: false, short: false, hash: null });
+    const h = harness();
+    expect(await runReanchor(h.ctx, SPOT, NOW)).toBe(true);
+    expect(h.ctx.state.lastReanchorTs).toBe(0);
+  });
+
+  it('keeps the gas floor', async () => {
+    process.env.GAS_FLOOR_WEI = '1000000000000000';
+    const h = harness({ gas: BN('900000000000000') });
+    expect(await runReanchor(h.ctx, SPOT, NOW)).toBe(false);
+    expect(anchorOnce).not.toHaveBeenCalled();
+    expect(h.lines.some((l) => l.includes('below floor'))).toBe(true);
+  });
+
+  it('says so when it has no budget for the side it must sell', async () => {
+    process.env.REANCHOR_MAX_IN1 = '0';
+    const h = harness();
+    expect(await runReanchor(h.ctx, SPOT, NOW)).toBe(false);
+    expect(anchorOnce).not.toHaveBeenCalled();
+    expect(h.lines.some((l) => l.includes('no budget to sell atBTC'))).toBe(true);
   });
 
   it('respects its own interval and the extreme regime', async () => {
-    const cooled = harness({ dryRun: true });
+    const cooled = harness();
     cooled.ctx.state.lastReanchorTs = NOW - 60;
     expect(await runReanchor(cooled.ctx, SPOT, NOW)).toBe(false);
-    expect(cooled.quote).not.toHaveBeenCalled();
     expect(cooled.lines.some((l) => l.startsWith('re-anchor: min interval'))).toBe(true);
 
     Object.assign(process.env, { REGIME_ENABLED: 'true', MM_DATA_PROVIDER: '0x' + '06'.repeat(20), MM_UNDERLYING: TBTC });
-    const extreme = harness({ dryRun: true });
+    const extreme = harness();
     expect(await runReanchor(extreme.ctx, SPOT, NOW)).toBe(false);
-    expect(extreme.quote).not.toHaveBeenCalled();
     expect(extreme.lines.some((l) => l.includes('regime EXTREME'))).toBe(true);
+    expect(anchorOnce).not.toHaveBeenCalled();
   });
 });
 
-describe('bridge geometry', () => {
-  it('sits one full spacing past spot on the side the swap crosses', () => {
-    expect(bridgeRange(-109797, false, 60)).toEqual([-109740, -109680]);
-    expect(bridgeRange(-109797, true, 60)).toEqual([-109860, -109800]);
-    expect(bridgeRange(-109800, true, 60)).toEqual([-109860, -109800]);
-    expect(bridgeRange(-109800, false, 60)).toEqual([-109740, -109680]);
+describe('anchorOnce', () => {
+  const real = () => vi.importActual<typeof import('../src/reanchor')>('../src/reanchor');
+
+  function fakes(o: { allowance?: ethers.BigNumber; preflight?: Error; send?: Error; mined?: Error } = {}) {
+    const approve = vi.fn(async () => ({ hash: '0xa1', wait: async () => ({}) }));
+    const token = { allowance: async () => o.allowance ?? BN(0), approve };
+    vi.spyOn(ethers, 'Contract').mockImplementation((() => token) as any);
+    const anchor = {
+      address: ANCHOR,
+      callStatic: { anchor: vi.fn(async () => { if (o.preflight) throw o.preflight; return [BN(0), BN(0)]; }) },
+      anchor: vi.fn(async () => {
+        if (o.send) throw o.send;
+        return { hash: '0xb2', wait: async () => { if (o.mined) throw o.mined; return {}; } };
+      }),
+    };
+    const args = {
+      signer: { address: SIGNER } as any,
+      anchor: anchor as any,
+      pool: POOL,
+      tokenIn: ATBTC,
+      max0: BN(0),
+      max1: BN(1000),
+      target: BN(123),
+      overrides: {},
+      confirmations: 1,
+      log: () => {},
+    };
+    return { approve, anchor, args };
+  }
+
+  afterEach(() => vi.restoreAllMocks());
+
+  it('approves the cap, then preflights and sends the anchor', async () => {
+    const f = fakes();
+    const r = await (await real()).anchorOnce(f.args);
+    expect(f.approve).toHaveBeenCalledWith(ANCHOR, BN(1000), {});
+    expect(f.anchor.callStatic.anchor).toHaveBeenCalledWith(POOL, BN(123), BN(0), BN(1000), {});
+    expect(r).toEqual({ sent: true, anchored: true, ok: true, short: false, hash: '0xb2' });
   });
 
-  it('is a twentieth of the budget at the oracle, in the other token', () => {
-    const p = 1 / 58000; // token1 per token0
-    expect(Number(bridgeAmount(10_000_000_000_000n, p, false))).toBeCloseTo((1e13 * 58000) / 20, -6);
-    expect(Number(bridgeAmount(1_000_000_000_000_000_000n, p, true))).toBeCloseTo((1e18 / 58000) / 20, -2);
+  it('skips the approve when the allowance covers the cap', async () => {
+    const f = fakes({ allowance: BN(1000) });
+    await (await real()).anchorOnce(f.args);
+    expect(f.approve).not.toHaveBeenCalled();
+  });
+
+  it('reports a cap that falls short at the preflight, sending nothing', async () => {
+    const f = fakes({ allowance: BN(1000), preflight: reverted('target not reached') });
+    const r = await (await real()).anchorOnce(f.args);
+    expect(f.anchor.anchor).not.toHaveBeenCalled();
+    expect(r).toEqual({ sent: false, anchored: false, ok: false, short: true, hash: null });
+  });
+
+  it('a send that throws before reaching the chain is neither anchored nor short', async () => {
+    const f = fakes({ allowance: BN(1000), send: new Error('nonce too low') });
+    const r = await (await real()).anchorOnce(f.args);
+    expect(r).toEqual({ sent: false, anchored: false, ok: false, short: false, hash: null });
+  });
+
+  it('an anchor that reverts on chain is anchored but not ok', async () => {
+    const f = fakes({ allowance: BN(1000), mined: new Error('transaction failed') });
+    const r = await (await real()).anchorOnce(f.args);
+    expect(r).toEqual({ sent: true, anchored: true, ok: false, short: false, hash: '0xb2' });
+  });
+});
+
+describe('omnipoolPrice', () => {
+  const real = () => vi.importActual<typeof import('../src/reanchor')>('../src/reanchor');
+  // HOLLAR: 100 LRNA against 1000 HOLLAR; tBTC: 6000 LRNA against 1 tBTC
+  const listed: Record<number, { hub: string; free: string; decimals: number }> = {
+    222: { hub: '100000000000000', free: '1000000000000000000000', decimals: 18 },
+    1000765: { hub: '6000000000000000', free: '1000000000000000000', decimals: 18 },
+  };
+  const api = {
+    query: {
+      omnipool: {
+        assets: async (id: number) =>
+          listed[id] ? { isNone: false, unwrap: () => ({ hubReserve: listed[id].hub }) } : { isNone: true },
+      },
+      assetRegistry: { assets: async (id: number) => ({ toJSON: () => ({ decimals: listed[id]?.decimals ?? 18 }) }) },
+    },
+    call: { currenciesApi: { account: async (id: number) => ({ free: listed[id]?.free ?? '0' }) } },
+  };
+
+  it('prices token1 per token0 from hub reserves and balances', async () => {
+    expect(await (await real()).omnipoolPrice(api as any, [222, 1000765])).toBeCloseTo(1 / 60000, 12);
+  });
+
+  it('throws for an asset not in the Omnipool', async () => {
+    await expect((await real()).omnipoolPrice(api as any, [222, 1006])).rejects.toThrow(/not in the Omnipool/);
   });
 });
 
@@ -577,19 +497,7 @@ describe('revert classification', () => {
       error: { code: 'SERVER_ERROR', error: { message: 'execution reverted: 0x' } },
     });
     expect(real.isRevert(noCode)).toBe(true);
-    expect(real.revertReason(reverted('Invalid token ID'))).toBe('Invalid token ID');
-  });
-
-  it('drops a burned bridge but never forgets one over an rpc failure', async () => {
-    const real = await vi.importActual<typeof import('../src/reanchor')>('../src/reanchor');
-    const npm = (err: any) => ({
-      positions: async (id: string) => {
-        if (id === '1') throw err;
-        return { tickLower: -60, tickUpper: 0, liquidity: BN(5) };
-      },
-    });
-    expect((await real.findBridges(npm(reverted('Invalid token ID')) as any, ['1', '2'])).map((b) => b.tokenId.toString())).toEqual(['2']);
-    await expect(real.findBridges(npm(timedOut()) as any, ['1', '2'])).rejects.toThrow();
+    expect(real.revertReason(reverted('target not reached'))).toBe('target not reached');
   });
 });
 
@@ -607,7 +515,7 @@ describe('freshSubstrate', () => {
     expect(reconnect).not.toHaveBeenCalled();
   });
 
-  it('reconnects after a runtime upgrade, so calls are encoded against the new metadata', async () => {
+  it('reconnects after a runtime upgrade, so storage is decoded against the new metadata', async () => {
     const a = api(false);
     const b = api(true);
     expect(await freshSubstrate(a as any, async () => b as any)).toBe(b);
